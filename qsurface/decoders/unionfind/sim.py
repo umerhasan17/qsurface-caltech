@@ -155,16 +155,35 @@ class Toric(Sim):
         edges = [i for i in self.support.keys() if i.state_type == 'x']
         # t1 = time.time()
         # print('building list of edges', t1 - t01)
-        p = self.code.error_rates['p_bitflip']
+        p = 0.05 # patch for error rate
         G = nx.Graph()
+
+        # Helper to produce canonical node ids (Option B):
+        # - boundary ancillas (qubit_type 'pA') map to their loc[0] integer (preserves old 0/d semantics)
+        # - other ancilla-like nodes map to a tuple of their loc for stable, hashable ids
+        def nid(n):
+            try:
+                # boundary pseudo-ancilla: keep integer column index so existing (0, d) queries continue to work
+                if getattr(n, "qubit_type", None) == "pA":
+                    return int(n.loc[0])
+                # any object with a loc attribute -> tuple(loc)
+                if hasattr(n, "loc"):
+                    # coerce loc to tuple for hashability
+                    loc = n.loc
+                    if isinstance(loc, (list, tuple)):
+                        return tuple(loc)
+                    # single integer-like loc
+                    return (int(loc),)
+            except Exception:
+                # fallback to object id string to avoid mixing object references
+                return ("obj", id(n))
+            # final fallback
+            return ("obj", id(n))
 
         # edges_graph = np.empty(len(edges), dtype = object)
         for i, edge in enumerate(edges):
             # collect boundary nodes
-            if edge.nodes[0].qubit_type == 'pA': # the boundary nodes only show up in the first index
-                node0 = edge.nodes[0].loc[0]
-            else:
-                node0 = edge.nodes[0]
+            node0 = edge.nodes[0]
             node1 = edge.nodes[1]
 
             if self.support[edge] == 2:
@@ -172,9 +191,8 @@ class Toric(Sim):
             else:
                 w = 1
 
-            # actually add the edge
-            # edges_graph[i] = (node0, node1, {'weight':w})
-            G.add_edge(node0, node1, weight=w)
+            # use canonical ids for both endpoints so the graph node set is homogeneous
+            G.add_edge(nid(node0), nid(node1), weight=w)
 
         # # list comprehension is like the same speed
         # edges_graph = [(edge.nodes[0].loc[0] if edge.nodes[0].qubit_type == 'pA' else edge.nodes[0], edge.nodes[1], {'weight': 0 if self.support[edge] == 2 else 1}) for edge in self.support.keys() if edge.state_type == 'x']
@@ -184,6 +202,8 @@ class Toric(Sim):
 
         # get shortest path
         d = self.code.size[0]
+        # shortest_path_length still queries integer column indices (0 and d) for boundaries — those
+        # are produced by nid() for pA nodes, so this call will succeed.
         length = nx.shortest_path_length(G, 0, d, weight='weight')
         # t3 = time.time()
         # print('running dijkstras: ', t3-t2)

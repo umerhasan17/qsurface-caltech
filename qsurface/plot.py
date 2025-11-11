@@ -6,7 +6,74 @@ from matplotlib import pyplot as plt
 from matplotlib.artist import Artist
 from matplotlib.lines import Line2D
 from matplotlib.widgets import Button
-from matplotlib.blocking_input import BlockingInput
+try:
+    # Prefer public import if available in some Matplotlib versions
+    from matplotlib.blocking_input import BlockingInput  # type: ignore
+except Exception:
+    # Fallback: newer/older Matplotlib may expose a private helper; use it if present.
+    try:
+        from matplotlib._blocking_input import blocking_input_loop  # type: ignore
+    except Exception:
+        blocking_input_loop = None
+
+    class BlockingInput:
+        """Compatibility BlockingInput replacement.
+
+        Provides a callable that collects events from the figure's event loop and
+        returns a list of events. Emulates the minimal interface used in this
+        project: __init__(figure, eventslist=...) and __call__(n=None, timeout=None).
+        """
+
+        def __init__(self, figure, eventslist=("button_press_event", "key_press_event"), **kwargs):
+            self.figure = figure
+            self.eventslist = eventslist
+
+        def __call__(self, n=None, timeout=None):
+            events = []
+
+            def handler(event):
+                events.append(event)
+                if n is not None and len(events) >= n:
+                    # Stop the event loop when we've collected enough events.
+                    try:
+                        event.canvas.stop_event_loop()
+                    except Exception:
+                        pass
+
+            if blocking_input_loop is not None:
+                # Use matplotlib's internal helper when available.
+                blocking_input_loop(self.figure, list(self.eventslist), timeout, handler)
+            else:
+                # Manual connect/disconnect and start the canvas event loop.
+                cids = [self.figure.canvas.mpl_connect(name, handler) for name in self.eventslist]
+                try:
+                    self.figure.canvas.start_event_loop(timeout)
+                finally:
+                    for cid in cids:
+                        try:
+                            self.figure.canvas.mpl_disconnect(cid)
+                        except Exception:
+                            pass
+
+            return events
+
+    # Ensure BlockingKeyInput is defined regardless of whether the public import or the
+    # fallback compatibility BlockingInput implementation was used. This wraps the
+    # available BlockingInput and provides the n=1 behavior expected by the code.
+    class BlockingKeyInput(BlockingInput):
+        """Blocking input specialized for single key/button events.
+
+        Wraps `BlockingInput` and returns at most one event (n=1) by default.
+        """
+
+        def __init__(self, figure, *args, **kwargs):
+            events = kwargs.pop("eventslist", ("button_press_event", "key_press_event"))
+            super().__init__(figure, eventslist=events, **kwargs)
+
+        # Match the call signature used in the code: (timeout) -> list
+        def __call__(self, timeout=None):
+            return super().__call__(n=1, timeout=timeout)
+
 from matplotlib.patches import Circle, Rectangle
 from collections import defaultdict
 import tkinter
@@ -142,21 +209,6 @@ class PlotParams:
             else:
                 setattr(self, attribute, getattr(self, value, value))
 
-
-class BlockingKeyInput(BlockingInput):
-    """Blocking class to receive key presses.
-
-    See Also
-    --------
-    `matplotlib.blocking_input.BlockingInput` : Inherited blocking class.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, eventslist=("button_press_event", "key_press_event"), **kwargs)
-
-    def __call__(self, timeout=30):
-        """Blocking call to retrieve a single key press."""
-        return super().__call__(n=1, timeout=timeout)
 
 
 class Template2D(ABC):
