@@ -53,6 +53,11 @@ class Cluster(object):
     def __hash__(self):
         return self.index, self.instance
 
+    @property
+    def is_active(self):
+        """A cluster is 'active' if its syndrome count is odd."""
+        return (self.parity % 2 == 1) and (not self.on_bound)
+
     def add_ancilla(self, ancilla: AncillaQubit):
         """Adds an ancilla to a cluster."""
         ancilla.cluster = self

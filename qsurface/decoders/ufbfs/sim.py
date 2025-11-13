@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 from ...codes.elements import AncillaQubit, Edge, PseudoQubit
 from .elements import Cluster
 from .._template import Sim
@@ -358,45 +358,89 @@ class Toric(Sim):
     """
 
     def grow_clusters(self, **kwargs):
-        """Grows odd-parity clusters outward for union with others until all clusters are even.
-
-        Lists of odd-parity clusters are maintained at ``self.buckets``. Starting from bucket 0, odd-parity clusters are popped from the bucket by 'grow_bucket and grown at the boundary by `grow_boundary` by adding 1 for every boundary edge in ``cluster.bound`` in ``self.support``. Grown clusters are then placed in a new bucket by `place_bucket` based on its size if it has odd parity.
-
-        Edges are fully added to the cluster per two growth iterations. Since a cluster with half-grown edges at the boundary has the same size (number of ancillas) as before growth, but is non-arguably *bigger*, the degeneracy in cluster size is differentiated by ``cluster.support``. When an union occurs between two clusters during growth, if the merged cluster is odd, it is placed in a new bucket. Thus the real bucket number is saved at the cluster locally as ``cluster.bucket``. These two checks are performed before a cluster is grown in `grow_bucket`.
-
-        The chronology of events per bucket must be the following:
-
-        1.  Grow all clusters in the bucket if checks passed.
-
-            *   Add all odd-parity clusters after growth to ``place_list``.
-            *   Add all merging clusters to ``union_list``.
-
-        2.  Merge all clusters in ``union_list``
-
-            *   Add odd-parity clusters after union to ``place_list``.
-
-        3.  Place all clusters in ``place_list`` in new bucket if parity is odd.
-
-        For clusters with ``cluster.support==1`` or with half-grown edges at the boundary, the new boundary at ``clusters.new_bound`` consists of the same half-grown edges. For clusters with ``cluster.support==0``, the new boundary is found by ``cluster_add_ancilla``.
-
-        If *weighted_growth* is disabled, odd-parity clusters are always placed in ``self.buckets[0]``. The same checks for ``cluster.bucket`` and ``cluster.support`` are applied to ensure clusters growth is valid.
         """
-        if self.config["weighted_growth"]:
-            for bucket_i in range(self.buckets_num):
-                self.bucket_i = bucket_i
-                if bucket_i > self.bucket_max_filled:
-                    break
-                if bucket_i in self.buckets and self.buckets[bucket_i] != []:
-                    union_list, place_list = self.grow_bucket(self.buckets.pop(bucket_i), bucket_i)
-                    self.union_bucket(union_list)
-                    self.place_bucket(place_list, bucket_i)
-        else:
-            bucket_i = 0
-            while self.buckets[0]:
-                union_list, place_list = self.grow_bucket(self.buckets.pop(0), bucket_i)
-                self.union_bucket(union_list)
-                self.place_bucket(place_list, bucket_i)
-                bucket_i += 1
+            Grows all active (odd-parity) clusters in parallel using BFS,
+            one layer at a time, until all clusters are even (frozen).
+            (Implements Algorithm 1, lines 7-30)
+            """
+
+        # 1. INITIALIZE ACTIVE LIST (Pseudocode lines 1-6, 8)
+        # Get all root clusters that are initially active (odd)
+        active_roots: List[Cluster] = [cluster.find() for cluster in self.clusters if cluster.is_active]
+        # active_roots = {anc.cluster.find() for anc in self.code.ancillas if anc.syndrome}
+
+        while active_roots:
+
+            union_list = []
+            newly_occupied_nodes = []
+
+            # --- 2. GROWTH PHASE (Pseudocode lines 9-10, 14-16) ---
+            # Grow ALL active clusters by one layer simultaneously
+            for cluster_root in active_roots:
+
+                # Use cluster.new_bound, which holds the current boundary edges
+                current_boundary_edges = cluster_root.new_bound
+                cluster_root.new_bound = []  # Clear for next layer
+
+                for ancilla, edge, new_ancilla in current_boundary_edges:
+
+                    new_cluster: Optional[Cluster] = self.get_cluster(new_ancilla)  # This can be None
+
+                    # Check if new_ancilla is part of our own cluster
+                    if new_cluster is not None and new_cluster.find() == cluster_root:
+                        continue
+
+                    # Check if the node is a boundary
+                    is_boundary_node = isinstance(new_ancilla, PseudoQubit)
+
+                    # Check if the node belongs to another cluster *from this instance*
+                    is_other_cluster = (new_cluster is not None and
+                                        new_cluster.instance == self.code.instance)
+
+                    # A node is "occupied" if it's a boundary OR another cluster
+                    if is_boundary_node or is_other_cluster:
+                        # Occupied: Add to list for merge phase (Pseudocode line 11)
+                        union_list.append((ancilla, edge, new_ancilla))
+                    else:
+                        # Unoccupied: claim it (Pseudocode line 15)
+                        self.cluster_add_ancilla(cluster_root, new_ancilla, parent=ancilla)
+                        newly_occupied_nodes.append(new_ancilla)
+
+            # --- 3. FIND NEXT BOUNDARY (INLINED) ---
+            # For all nodes we *just* claimed, find their neighbors
+            # and add those edges to the cluster's *new* boundary list
+            # This replaces the old 'grow_boundary' logic.
+            for node in newly_occupied_nodes:
+                cluster_root = node.cluster.find()
+
+                for cur_direction, (cur_ancilla, edge) in self.get_neighbors(node).items():
+                    neighbor_tuple = self.get_neighbor(node, cur_direction)
+                    neighbor_ancilla = neighbor_tuple[0]
+
+                    # --- REPLACEMENT ---
+                    new_cluster_neighbor = self.get_cluster(neighbor_ancilla)
+
+                    # Check if the neighbor is a boundary (None) or part of another cluster
+                    if new_cluster_neighbor is None:
+                        neighbor_root = None  # It's a boundary
+                    else:
+                        neighbor_root = new_cluster_neighbor.find()
+                    # --- END REPLACEMENT ---
+
+                    if neighbor_root != cluster_root:
+                        # This edge leads to another cluster or a boundary
+                        # Add it to the *root's* boundary list for the *next* iteration
+                        cluster_root.new_bound.append((node, edge, neighbor_ancilla))
+
+            # --- 4. MERGE PHASE (Pseudocode lines 11-13) ---
+            # Call your *unmodified* union_bucket function.
+            # It already handles parity updates correctly.
+            self.union_bucket(union_list)
+
+            # --- 5. UPDATE ACTIVE LIST (Pseudocode line 18-20) ---
+            # Re-calculate the set of active *roots* from *all* clusters
+            # to prepare for the next 'while' loop iteration.
+            active_roots = [c.find() for c in self.clusters if c.find().is_active]
 
     def grow_bucket(self, bucket: List[Cluster], bucket_i: int, **kwargs) -> Tuple[List, List]:
         """Grows the clusters which are contained in the current bucket.
@@ -469,34 +513,40 @@ class Toric(Sim):
     """
 
     def union_bucket(self, union_list: List[Tuple[AncillaQubit, Edge, AncillaQubit]], **kwargs):
-        """Merges clusters in ``union_list`` if checks are passed.
-
-        Items in ``union_list`` consists of ``[ancillaA, edge, ancillaB]`` of two ancillas that, at the time added to the list, were not part of the same cluster. The cluster of an ancilla is stored at ``ancilla.cluster``, but due to cluster mergers the cluster at ``ancilla_cluster`` may not be the root element in the cluster-tree, and thus the cluster must be requested by ``ancilla.cluster.`` `~.unionfind.elements.Cluster.find`. Since the clusters of ``ancillaA`` and ``ancillaB`` may have already merged, checks are performed in `union_check` after which the clusters are conditionally merged on ``edge`` by `union_edge`.
-
-        If ``weighted_union`` is enabled, the smaller cluster is always made a child of the bigger cluster in the cluster-tree. This ensures the that the depth of the tree is minimized and the future calls to `~.unionfind.elements.Cluster.find` is reduced.
-
-        If ``dynamic_forest`` is disabled, cycles within clusters are not immediately removed. The acyclic forest is then later constructed before peeling in `peel_leaf`.
-
-        Parameters
-        ----------
-        union_list
-            List of potential mergers between two cluster-distinct ancillas.
-        """
+        """Merges clusters, handling boundaries (Pseudocode lines 11-13)."""
         if union_list and self.config["print_steps"]:
             print("Cluster unions.")
 
         for ancilla, edge, new_ancilla in union_list:
-            cluster = self.get_cluster(ancilla)
-            new_cluster = self.get_cluster(new_ancilla)
+            cluster_root = self.get_cluster(ancilla).find()
+            new_cluster = self.get_cluster(new_ancilla)  # This can be None
 
-            if self.union_check(edge, ancilla, new_ancilla, cluster, new_cluster):
-                string = "{}∪{}=".format(cluster, new_cluster) if self.config["print_steps"] else ""
+            if new_cluster is None:
+                # --- THIS IS A BOUNDARY MERGE ---
+                # This ancilla is a PseudoQubit (boundary)
+                if not cluster_root.on_bound:
+                    cluster_root.on_bound = True
+                    if self.config["print_steps"]:
+                        print(f"{cluster_root} hit boundary, now frozen.")
 
-                if self.config["weighted_union"] and cluster.size < new_cluster.size:
-                    cluster, new_cluster = new_cluster, cluster
-                cluster.union(new_cluster)
-                if string:
-                    print(string, cluster)
+            else:
+                # --- THIS IS A CLUSTER-CLUSTER MERGE ---
+                new_cluster_root = new_cluster.find()
+                if cluster_root != new_cluster_root:
+
+                    string = "{}∪{}=".format(cluster_root, new_cluster_root) if self.config["print_steps"] else ""
+
+                    # Your .union() method already handles parity, size, etc.
+                    # Just make sure to merge the roots correctly.
+                    if self.config["weighted_union"] and cluster_root.size < new_cluster_root.size:
+                        new_cluster_root.union(cluster_root)  # Merges cluster into new_cluster
+                        if string: print(string, new_cluster_root)
+                    else:
+                        cluster_root.union(new_cluster_root)  # Merges new_cluster into cluster
+                        if string: print(string, cluster_root)
+
+                elif self.config["dynamic_forest"]:
+                    self._edge_peel(edge, variant="cycle")
 
         if union_list and self.config["print_steps"]:
             print("")
