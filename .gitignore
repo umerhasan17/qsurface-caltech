@@ -4,11 +4,14 @@
 *.csv
 *.txt
 *.ini
+*.pdf
 !requirements.txt
 !pytest.ini
 test.py
 qsurface/decoders/mwpm/blossom5-v2.05.src/
 !qsurface/decoders/decoders.ini
+.idea/
+images/
 
 .python-version
 .vscode/
