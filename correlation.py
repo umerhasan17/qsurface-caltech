@@ -20,7 +20,7 @@ def decode_outer_code(
         inner_phis: List[float],
         pfail_model: Callable[[float], float],
         H: np.ndarray,
-        max_iterations: int  # <-- This is from Algorithm 3, Line 6
+        max_iterations: int
 ) -> Tuple[np.ndarray, np.ndarray]:
     num_checks, num_vars = H.shape
 
@@ -31,8 +31,15 @@ def decode_outer_code(
     # ... (LLR initialization, Eq. 2) ...
     c_hat = np.array(inner_decisions)
     pfail_values = np.array([pfail_model(phi) for phi in inner_phis])
-    pfail_values = np.clip(pfail_values, 1e-15, 1.0 - 1e-15)
+    pfail_values = np.clip(pfail_values, 1e-6, 1.0 - 1e-6)
+    
+    # Compute LLRs: LLR = (1 - 2*c_hat) * log((1 - p_fail) / p_fail)
+    # This gives strong positive LLR when c_hat=0 (no error) and p_fail is low
+    # And strong negative LLR when c_hat=1 (error) and p_fail is high
     initial_llrs = (1 - 2 * c_hat) * np.log((1 - pfail_values) / pfail_values)
+    
+    # The LLRs are already properly scaled by the p_fail model
+    # No additional boosting needed - the model parameters handle this
 
     m_v_to_c = np.zeros((num_checks, num_vars))
     m_c_to_v = np.zeros((num_checks, num_vars))
@@ -84,12 +91,59 @@ def decode_outer_code(
     return final_decisions, final_llrs
 
 def example_pfail_model(phi: float) -> float:
+    normalized_phi = phi / 25.0
+    log_likelihood = 2.0 * normalized_phi - 3.0
+    p_fail = 1.0 / (1.0 + np.exp(-log_likelihood))
+    return np.clip(p_fail, 1e-4, 1.0 - 1e-4)
+
+
+def hard_decode_outer(inner_decisions: List[int], H: np.ndarray) -> Tuple[np.ndarray, bool]:
     """
-    Example p_fail model: p_fail(phi) = sigmoid(slope * phi + intercept)
-    This should be fitted from calibration data in practice.
+    Hard decoding: simple majority vote for repetition code, or syndrome-based for general codes.
+    For [3,1] repetition code, this is just majority vote.
+    Returns (final_decisions, success).
     """
-    log_likelihood = 0.8 * phi + 0.0  # (slope * phi + intercept)
-    return 1.0 / (1.0 + np.exp(log_likelihood))
+    inner_decisions = np.array(inner_decisions)
+    
+    # For repetition code, use majority vote
+    if H.shape[0] == 2 and H.shape[1] == 3:  # [3,1] repetition code
+        # Majority vote: if 2 or more blocks have error, output error
+        num_errors = np.sum(inner_decisions)
+        if num_errors >= 2:
+            # All blocks have error
+            final_decisions = np.ones(3, dtype=int)
+        else:
+            # No error (majority is correct)
+            final_decisions = np.zeros(3, dtype=int)
+    else:
+        # For general codes, use syndrome-based hard decoding
+        # Try to find a valid codeword that matches the syndrome
+        syndrome = (H.dot(inner_decisions) % 2).astype(int)
+        if np.all(syndrome == 0):
+            # Syndrome satisfied, use original decisions
+            final_decisions = inner_decisions.copy()
+        else:
+            # Syndrome not satisfied - try flipping bits to satisfy syndrome
+            # Simple approach: flip the bit that appears in most unsatisfied checks
+            final_decisions = inner_decisions.copy()
+            for _ in range(10):  # Max iterations
+                syndrome = (H.dot(final_decisions) % 2).astype(int)
+                if np.all(syndrome == 0):
+                    break
+                # Find variable that appears in most unsatisfied checks
+                unsatisfied_checks = np.where(syndrome == 1)[0]
+                if len(unsatisfied_checks) == 0:
+                    break
+                # Count appearances in unsatisfied checks
+                var_counts = np.zeros(H.shape[1])
+                for c in unsatisfied_checks:
+                    var_counts += H[c, :]
+                # Flip the variable with highest count
+                flip_var = np.argmax(var_counts)
+                final_decisions[flip_var] = 1 - final_decisions[flip_var]
+    
+    success = np.all(final_decisions == 0)
+    return final_decisions, success
 
 
 def run_single_trial(
@@ -102,7 +156,7 @@ def run_single_trial(
 ) -> Dict:
     """
     Run a single trial of hierarchical decoding.
-    Returns a dictionary with results.
+    Returns a dictionary with results for both soft and hard decoding.
     """
     outer_code_size = H_outer.shape[1]
     
@@ -117,33 +171,40 @@ def run_single_trial(
         inner_hard_decisions.append(c_hat)
         inner_phi_scores.append(phi)
     
-    # Run outer decoder
-    final_decisions, final_llrs = decode_outer_code(
+    # SOFT DECODING: Run outer decoder with soft priors
+    soft_decisions, soft_llrs = decode_outer_code(
         inner_decisions=inner_hard_decisions,
         inner_phis=inner_phi_scores,
         pfail_model=pfail_model,
         H=H_outer,
         max_iterations=max_iterations
     )
+    soft_success = np.all(soft_decisions == 0)
     
-    # Check if outer decoding succeeded (all-zero codeword)
-    outer_success = np.all(final_decisions == 0)
-    
-    # Calculate p_L from final LLRs
+    # Calculate p_L from soft LLRs
     def log_prob_zero(llr):
         return -np.logaddexp(0, -llr)
     
-    log_prob_correct = np.sum([log_prob_zero(llr) for llr in final_llrs])
-    p_L_outer = -np.expm1(log_prob_correct)
-    p_L_outer = np.clip(p_L_outer, 1e-15, 1.0 - 1e-15)
+    log_prob_correct = np.sum([log_prob_zero(llr) for llr in soft_llrs])
+    p_L_soft = -np.expm1(log_prob_correct)
+    p_L_soft = np.clip(p_L_soft, 1e-15, 1.0 - 1e-15)
+    
+    # HARD DECODING: Just use hard decisions
+    hard_decisions, hard_success = hard_decode_outer(inner_hard_decisions, H_outer)
+    
+    # For hard decoding, p_L is just 1 if failed, 0 if succeeded (or we can estimate from error rate)
+    p_L_hard = 0.0 if hard_success else 1.0
     
     return {
         'inner_decisions': inner_hard_decisions,
         'inner_phis': inner_phi_scores,
-        'outer_decisions': final_decisions,
-        'outer_llrs': final_llrs,
-        'outer_success': outer_success,
-        'p_L_outer': p_L_outer,
+        'soft_decisions': soft_decisions,
+        'soft_llrs': soft_llrs,
+        'soft_success': soft_success,
+        'p_L_soft': p_L_soft,
+        'hard_decisions': hard_decisions,
+        'hard_success': hard_success,
+        'p_L_hard': p_L_hard,
         'inner_errors': sum(inner_hard_decisions)  # Count of inner block errors
     }
 
@@ -159,12 +220,14 @@ def collect_data(
 ) -> Dict:
     """
     Collect statistics over multiple trials.
+    Returns results for both soft and hard decoding.
     """
     results = {
-        'inner_error_rate': [],
-        'outer_error_rate': [],
-        'inner_phis': [],
-        'p_L_outer': []
+        'soft_error_rate': [],
+        'hard_error_rate': [],
+        'soft_p_L': [],
+        'hard_p_L': [],
+        'inner_phis': []
     }
     
     print(f"Running {n_trials} trials for p={p_physical}, decoder={decoder_name}...")
@@ -182,37 +245,44 @@ def collect_data(
             max_iterations=max_iterations
         )
         
-        # Inner code error rate (fraction of blocks with logical errors)
-        inner_error_rate = trial_result['inner_errors'] / len(trial_result['inner_decisions'])
-        results['inner_error_rate'].append(inner_error_rate)
+        # Soft decoding error rate (1 if soft decoding failed)
+        soft_error_rate = 1.0 if not trial_result['soft_success'] else 0.0
+        results['soft_error_rate'].append(soft_error_rate)
+        results['soft_p_L'].append(trial_result['p_L_soft'])
         
-        # Outer code error rate (1 if outer decoding failed)
-        outer_error_rate = 1.0 if not trial_result['outer_success'] else 0.0
-        results['outer_error_rate'].append(outer_error_rate)
+        # Hard decoding error rate (1 if hard decoding failed)
+        hard_error_rate = 1.0 if not trial_result['hard_success'] else 0.0
+        results['hard_error_rate'].append(hard_error_rate)
+        results['hard_p_L'].append(trial_result['p_L_hard'])
         
         results['inner_phis'].extend(trial_result['inner_phis'])
-        results['p_L_outer'].append(trial_result['p_L_outer'])
     
     return results
 
 
 def generate_publication_chart(
-        data_dict: Dict[str, Dict],
-        output_path: str = "hierarchical_decoding_results.pdf",
-        figsize: Tuple[float, float] = (6, 4.5)
+        decoder_name: str,
+        decoder_data: Dict,
+        output_path: str = None,
+        figsize: Tuple[float, float] = (5, 4)
 ) -> None:
     """
-    Generate a publication-quality chart comparing inner vs outer code performance.
+    Generate a publication-quality chart comparing soft vs hard decoding.
     
     Parameters:
     -----------
-    data_dict : Dict with structure {decoder_name: {p_physical: results_dict}}
-        Results from collect_data for different decoders and error rates
+    decoder_name : str
+        Name of the decoder
+    decoder_data : Dict with structure {p_physical: results_dict}
+        Results from collect_data for different error rates
     output_path : str
-        Path to save the figure
+        Path to save the figure (auto-generated if None)
     figsize : Tuple
         Figure size in inches
     """
+    if output_path is None:
+        output_path = f"soft_vs_hard_{decoder_name}.png"
+    
     # Set publication-quality style
     matplotlib.rcParams.update({
         'font.size': 10,
@@ -224,88 +294,68 @@ def generate_publication_chart(
         'ytick.labelsize': 9,
         'legend.fontsize': 9,
         'figure.titlesize': 12,
-        'lines.linewidth': 1.5,
-        'lines.markersize': 6,
+        'lines.linewidth': 2.0,
+        'lines.markersize': 7,
         'axes.linewidth': 0.8,
         'grid.linewidth': 0.5,
         'xtick.major.width': 0.8,
         'ytick.major.width': 0.8,
     })
     
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, dpi=300)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, dpi=300)
     
-    markers = ['o', 's', '^', 'D', 'v']
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    p_physical_list = sorted(decoder_data.keys())
+    soft_error_rates = []
+    hard_error_rates = []
     
-    for idx, (decoder_name, decoder_data) in enumerate(data_dict.items()):
-        p_physical_list = sorted(decoder_data.keys())
-        inner_error_rates = []
-        outer_error_rates = []
-        inner_error_stds = []
-        outer_error_stds = []
-        
-        for p_phys in p_physical_list:
-            results = decoder_data[p_phys]
-            inner_error_rates.append(np.mean(results['inner_error_rate']))
-            outer_error_rates.append(np.mean(results['outer_error_rate']))
-            inner_error_stds.append(np.std(results['inner_error_rate']))
-            outer_error_stds.append(np.std(results['outer_error_rate']))
-        
-        # Plot 1: Logical error rate vs physical error rate
-        label = decoder_name.upper() if decoder_name else 'Decoder'
-        ax1.errorbar(
-            p_physical_list, inner_error_rates,
-            yerr=inner_error_stds,
-            marker=markers[idx % len(markers)],
-            color=colors[idx % len(colors)],
-            label=f'Inner Code ({label})',
-            capsize=3,
-            capthick=1,
-            linestyle='--',
-            alpha=0.7
-        )
-        ax1.errorbar(
-            p_physical_list, outer_error_rates,
-            yerr=outer_error_stds,
-            marker=markers[idx % len(markers)],
-            color=colors[idx % len(colors)],
-            label=f'Outer Code ({label})',
-            capsize=3,
-            capthick=1,
-            linestyle='-',
-            alpha=1.0
-        )
-        
-        # Plot 2: Improvement factor (inner_error_rate / outer_error_rate)
-        improvement = np.array(inner_error_rates) / (np.array(outer_error_rates) + 1e-10)
-        ax2.plot(
-            p_physical_list, improvement,
-            marker=markers[idx % len(markers)],
-            color=colors[idx % len(colors)],
-            label=label,
-            linewidth=1.5
-        )
+    for p_phys in p_physical_list:
+        results = decoder_data[p_phys]
+        # Use empirical error rates (fraction of failed trials)
+        # This gives a fair comparison between soft and hard decoding
+        soft_er = np.mean(results['soft_error_rate'])
+        hard_er = np.mean(results['hard_error_rate'])
+        soft_error_rates.append(soft_er)
+        hard_error_rates.append(hard_er)
     
-    # Format Plot 1
-    ax1.set_xlabel('Physical Error Rate $p$', fontsize=11)
-    ax1.set_ylabel('Logical Error Rate $p_L$', fontsize=11)
-    ax1.set_title('Hierarchical Decoding Performance', fontsize=12, fontweight='bold')
-    ax1.set_yscale('log')
-    ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.legend(loc='best', frameon=True, fancybox=True, shadow=True)
-    ax1.set_xlim(left=0)
+    # Plot soft vs hard
+    ax.plot(
+        p_physical_list, soft_error_rates,
+        marker='o',
+        color='#2ca02c',
+        label='Soft decoding',
+        linewidth=2.0,
+        markersize=7,
+        linestyle='-',
+        alpha=0.9
+    )
+    ax.plot(
+        p_physical_list, hard_error_rates,
+        marker='s',
+        color='#d62728',
+        label='Hard decoding',
+        linewidth=2.0,
+        markersize=7,
+        linestyle='--',
+        alpha=0.9
+    )
     
-    # Format Plot 2
-    ax2.set_xlabel('Physical Error Rate $p$', fontsize=11)
-    ax2.set_ylabel('Improvement Factor', fontsize=11)
-    ax2.set_title('Outer Code Improvement', fontsize=12, fontweight='bold')
-    ax2.grid(True, alpha=0.3, linestyle='--')
-    ax2.legend(loc='best', frameon=True, fancybox=True, shadow=True)
-    ax2.axhline(y=1.0, color='gray', linestyle=':', linewidth=1, alpha=0.5)
-    ax2.set_xlim(left=0)
+    # Format plot
+    ax.set_xlabel('Physical Error Rate $p$', fontsize=11)
+    ax.set_ylabel('Logical Error Rate $p_L$', fontsize=11)
+    decoder_label_map = {
+        'ufbfs': 'BFS-UFD',
+        'unionfind': 'Union Find'
+    }
+    decoder_label = decoder_label_map.get(decoder_name, decoder_name.upper() if decoder_name else 'Decoder')
+    ax.set_title(f'Soft vs Hard Decoding ({decoder_label})', fontsize=12, fontweight='bold')
+    ax.set_yscale('log')
+    ax.set_ylim(bottom=1e-5, top=2.0)  # Allow up to 2.0 to see values approaching 1
+    ax.grid(True, alpha=0.3, linestyle='--', which='both')
+    ax.legend(loc='best', frameon=True, fancybox=True, shadow=True)
+    ax.set_xlim(left=0, right=0.11)  # Focus on range 0.01 to 0.1
     
     plt.tight_layout()
-    plt.savefig(output_path, format='pdf', bbox_inches='tight', dpi=300)
+    plt.savefig(output_path, format='png', bbox_inches='tight', dpi=300)
     print(f"Chart saved to {output_path}")
     plt.close()
 
@@ -387,8 +437,9 @@ def main(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
 
 if __name__ == "__main__":
     # Configuration
-    P_BITFLIPS = [0.06, 0.08, 0.1, 0.12, 0.16, 0.2]
-    DECODERS = ["ufbfs"]  # Can add: "mwpm", "unionfind"
+    # Physical error rates from 10^-2 (0.01) to 10^-1 (0.1)
+    P_BITFLIPS = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
+    DECODERS = ["ufbfs", "unionfind"]  # Compare UFBFS and Union Find
     D_INNER = 5  # Inner code distance
     MAX_ITERATIONS = 1000
     N_TRIALS = 1000  # Number of trials per configuration
@@ -423,22 +474,25 @@ if __name__ == "__main__":
             all_data[DECODER_NAME][P_PHYSICAL] = results
             
             # Print summary
-            inner_er = np.mean(results['inner_error_rate'])
-            outer_er = np.mean(results['outer_error_rate'])
-            improvement = inner_er / (outer_er + 1e-10)
+            soft_er = np.mean(results['soft_p_L'])
+            hard_er = np.mean(results['hard_p_L'])
+            improvement = hard_er / (soft_er + 1e-10)
             print(f"\nSummary for p={P_PHYSICAL}:")
-            print(f"  Inner code error rate: {inner_er:.4f}")
-            print(f"  Outer code error rate: {outer_er:.4f}")
+            print(f"  Soft decoding error rate: {soft_er:.6f}")
+            print(f"  Hard decoding error rate: {hard_er:.6f}")
             print(f"  Improvement factor: {improvement:.2f}x")
     
-    # Generate publication chart
+    # Generate separate charts for each decoder
     print(f"\n{'='*60}")
-    print("Generating publication chart...")
+    print("Generating publication charts...")
     print(f"{'='*60}")
-    generate_publication_chart(
-        data_dict=all_data,
-        output_path="hierarchical_decoding_results.pdf"
-    )
+    
+    for DECODER_NAME in DECODERS:
+        generate_publication_chart(
+            decoder_name=DECODER_NAME,
+            decoder_data=all_data[DECODER_NAME],
+            output_path=f"soft_vs_hard_{DECODER_NAME}.png"
+        )
     
     print("\nDone!")
 

@@ -155,7 +155,8 @@ class Toric(Sim):
         edges = [i for i in self.support.keys() if i.state_type == 'x']
         # t1 = time.time()
         # print('building list of edges', t1 - t01)
-        p = 0.05 # patch for error rate
+        # p = 0.05 # patch for error rate
+        p = self.code.error_rates['p_bitflip']
         G = nx.Graph()
 
         # Helper to produce canonical node ids (Option B):
