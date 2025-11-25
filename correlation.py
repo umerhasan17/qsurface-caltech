@@ -18,7 +18,6 @@ def get_phi_inner(p_bitflip: float, decoder: str, d: int, N: int) -> float:
 def decode_outer_code(
         inner_decisions: List[int],
         inner_phis: List[float],
-        pfail_model: Callable[[float], float],
         H: np.ndarray,
         max_iterations: int
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -28,18 +27,18 @@ def decode_outer_code(
     N_v = [H[:, v].nonzero()[0] for v in range(num_vars)]  # Neighbors of var v
     N_c = [H[c, :].nonzero()[0] for c in range(num_checks)]  # Neighbors of check c
 
-    # ... (LLR initialization, Eq. 2) ...
     c_hat = np.array(inner_decisions)
-    pfail_values = np.array([pfail_model(phi) for phi in inner_phis])
-    pfail_values = np.clip(pfail_values, 1e-6, 1.0 - 1e-6)
+    phi_array = np.array(inner_phis)
     
-    # Compute LLRs: LLR = (1 - 2*c_hat) * log((1 - p_fail) / p_fail)
-    # This gives strong positive LLR when c_hat=0 (no error) and p_fail is low
-    # And strong negative LLR when c_hat=1 (error) and p_fail is high
-    initial_llrs = (1 - 2 * c_hat) * np.log((1 - pfail_values) / pfail_values)
-    
-    # The LLRs are already properly scaled by the p_fail model
-    # No additional boosting needed - the model parameters handle this
+    # Compute LLRs directly from phi
+    # High phi = more information about error = easier to find path = more confident
+    # Low phi = less information = less confident
+    # When c_hat=0 (no error): LLR should be positive, stronger when phi is high
+    # When c_hat=1 (error): LLR should be negative, stronger when phi is high
+    phi_scale = 8.0
+    base_llr = 2.0
+    confidence_factor = base_llr + phi_array / phi_scale
+    initial_llrs = (1 - 2 * c_hat) * confidence_factor
 
     m_v_to_c = np.zeros((num_checks, num_vars))
     m_c_to_v = np.zeros((num_checks, num_vars))
@@ -89,13 +88,6 @@ def decode_outer_code(
 
     final_decisions = (final_llrs < 0).astype(int)
     return final_decisions, final_llrs
-
-def example_pfail_model(phi: float) -> float:
-    normalized_phi = phi / 25.0
-    log_likelihood = 2.0 * normalized_phi - 3.0
-    p_fail = 1.0 / (1.0 + np.exp(-log_likelihood))
-    return np.clip(p_fail, 1e-4, 1.0 - 1e-4)
-
 
 def hard_decode_outer(inner_decisions: List[int], H: np.ndarray) -> Tuple[np.ndarray, bool]:
     """
@@ -151,7 +143,6 @@ def run_single_trial(
         decoder_name: str,
         d_inner: int,
         H_outer: np.ndarray,
-        pfail_model: Callable[[float], float],
         max_iterations: int
 ) -> Dict:
     """
@@ -175,7 +166,6 @@ def run_single_trial(
     soft_decisions, soft_llrs = decode_outer_code(
         inner_decisions=inner_hard_decisions,
         inner_phis=inner_phi_scores,
-        pfail_model=pfail_model,
         H=H_outer,
         max_iterations=max_iterations
     )
@@ -214,7 +204,6 @@ def collect_data(
         decoder_name: str,
         d_inner: int,
         H_outer: np.ndarray,
-        pfail_model: Callable[[float], float],
         max_iterations: int,
         n_trials: int
 ) -> Dict:
@@ -241,7 +230,6 @@ def collect_data(
             decoder_name=decoder_name,
             d_inner=d_inner,
             H_outer=H_outer,
-            pfail_model=pfail_model,
             max_iterations=max_iterations
         )
         
@@ -399,7 +387,6 @@ def main(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
     final_decisions, final_llrs = decode_outer_code(
         inner_decisions=inner_hard_decisions,
         inner_phis=inner_phi_scores,
-        pfail_model=example_pfail_model,
         H=H_outer_code,
         max_iterations=MAX_ITERATIONS
     )
@@ -434,67 +421,192 @@ def main(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
     # else:
     #     print("Result: Hierarchical decoding FAILED.")
 
+import numpy as np
+
+def estimate_pL_vs_phi(phis, Ls, bin_edges):
+    """
+    Estimate logical error probability p_L as a function of soft output phi
+    by binning data in phi.
+
+    Parameters
+    ----------
+    phis : array-like of shape (N,)
+        Soft outputs for each trial.
+    Ls : array-like of shape (N,)
+        Logical failure indicators for each trial (0 = success, 1 = failure).
+    bin_edges : array-like of shape (M+1,)
+        Bin edges for phi: [b0, b1, ..., bM]. Bins are [b_k, b_{k+1}).
+
+    Returns
+    -------
+    avg_phi_per_bin : np.ndarray
+        Mean phi value for samples in each non-empty bin.
+    pL_per_bin : np.ndarray
+        Estimated logical error probability in each non-empty bin.
+    counts_per_bin : np.ndarray
+        Number of samples in each non-empty bin.
+    """
+
+    phis = np.asarray(phis, dtype=float)
+    Ls = np.asarray(Ls, dtype=float)
+    bin_edges = np.asarray(bin_edges, dtype=float)
+
+    assert phis.shape == Ls.shape, "phis and Ls must have the same length"
+    num_bins = len(bin_edges) - 1
+
+    # digitize: returns bin index in 1..num_bins (inclusive) for each phi
+    # where bin k is [bin_edges[k-1], bin_edges[k])
+    bin_indices = np.digitize(phis, bin_edges) - 1  # shift to 0..num_bins-1
+
+    # Initialize accumulators
+    sum_phi_in_bin = np.zeros(num_bins, dtype=float)
+    sum_L_in_bin = np.zeros(num_bins, dtype=float)
+    count_in_bin = np.zeros(num_bins, dtype=int)
+
+    # Accumulate stats per bin
+    for phi, L, k in zip(phis, Ls, bin_indices):
+        if 0 <= k < num_bins:
+            sum_phi_in_bin[k] += phi
+            sum_L_in_bin[k] += L
+            count_in_bin[k] += 1
+        # else: phi fell outside the specified bin range → ignore
+
+    # Compute averages for non-empty bins
+    nonempty = count_in_bin > 0
+    avg_phi_per_bin = sum_phi_in_bin[nonempty] / count_in_bin[nonempty]
+    pL_per_bin = sum_L_in_bin[nonempty] / count_in_bin[nonempty]
+    log_likelihood_per_bin = np.log((1.0 - pL_per_bin) / pL_per_bin)
+
+    counts_per_bin = count_in_bin[nonempty]
+
+    return avg_phi_per_bin, log_likelihood_per_bin, counts_per_bin
+
+
+
+
+
+def main_inner_code(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
+    """
+    Main function for single trial (kept for backward compatibility).
+    """
+    # 2. DEFINE INNER CODE PARAMETERS
+    D_INNER = 5
+    N_INNER = 1
+
+    # 3. GET INNER DECODER RESULTS
+    inner_hard_decisions = []
+    inner_phi_scores = []
+
+    for i in range(MAX_ITERATIONS):
+        # Call your API for each block of the outer code
+        result_dict = get_phi_inner(P_PHYSICAL, DECODER_NAME, D_INNER, N_INNER)
+
+        # 'no_error' = 1 means decoder decided 0 (no logical error)
+        # 'no_error' = 0 means decoder decided 1 (logical error)
+        c_hat = 1 - result_dict['no_error']
+        phi = result_dict['phi']
+
+        inner_hard_decisions.append(c_hat)
+        inner_phi_scores.append(phi)
+
+    avg_phi, log_likelihood_per_bin, counts = estimate_pL_vs_phi(phis=inner_phi_scores, Ls=inner_hard_decisions, bin_edges=np.linspace(0, 20, 20))
+
+    import matplotlib.pyplot as plt
+    plt.plot(avg_phi, log_likelihood_per_bin, marker='o', linestyle='none')
+    plt.xlabel("soft output phi (binned)")
+    plt.ylabel("log likelihood logical error rate p_L")
+    plt.show()
+
+    # log_prob_correct = np.sum([log_prob_zero(llr) for llr in final_llrs])
+    # p_L_outer = -np.expm1(log_prob_correct)
+    # p_L_outer = np.clip(p_L_outer, 1e-15, 1.0 - 1e-15)
+    #
+    # log_likelihood_of_failure = np.log((1.0 - p_L_outer) / p_L_outer)
+
+    return 0
+
+
+    #
+    # print("---------------------------------------")
+    # print(f"Final Corrected Codeword: {final_code_word}")
+    #
+    # # Check if the final word is the all-zero (correct) word
+    # if np.all(final_code_word == 0):
+    #     print("Result: Hierarchical decoding SUCCESSFUL.")
+    # else:
+    #     print("Result: Hierarchical decoding FAILED.")
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
-    # Configuration
-    # Physical error rates from 10^-2 (0.01) to 10^-1 (0.1)
-    P_BITFLIPS = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
-    DECODERS = ["ufbfs", "unionfind"]  # Compare UFBFS and Union Find
-    D_INNER = 5  # Inner code distance
-    MAX_ITERATIONS = 1000
-    N_TRIALS = 1000  # Number of trials per configuration
-    
-    # Define outer code (e.g., [3,1] repetition code)
-    H_outer_code = np.array([
-        [1, 1, 0],
-        [0, 1, 1]
-    ])
-    
-    # Collect data for all configurations
-    all_data = {}
-    
-    for DECODER_NAME in DECODERS:
-        all_data[DECODER_NAME] = {}
-        
-        for P_PHYSICAL in P_BITFLIPS:
-            print(f"\n{'='*60}")
-            print(f"Collecting data: p={P_PHYSICAL}, decoder={DECODER_NAME}")
-            print(f"{'='*60}")
-            
-            results = collect_data(
-                p_physical=P_PHYSICAL,
-                decoder_name=DECODER_NAME,
-                d_inner=D_INNER,
-                H_outer=H_outer_code,
-                pfail_model=example_pfail_model,
-                max_iterations=MAX_ITERATIONS,
-                n_trials=N_TRIALS
-            )
-            
-            all_data[DECODER_NAME][P_PHYSICAL] = results
-            
-            # Print summary
-            soft_er = np.mean(results['soft_p_L'])
-            hard_er = np.mean(results['hard_p_L'])
-            improvement = hard_er / (soft_er + 1e-10)
-            print(f"\nSummary for p={P_PHYSICAL}:")
-            print(f"  Soft decoding error rate: {soft_er:.6f}")
-            print(f"  Hard decoding error rate: {hard_er:.6f}")
-            print(f"  Improvement factor: {improvement:.2f}x")
-    
-    # Generate separate charts for each decoder
-    print(f"\n{'='*60}")
-    print("Generating publication charts...")
-    print(f"{'='*60}")
-    
-    for DECODER_NAME in DECODERS:
-        generate_publication_chart(
-            decoder_name=DECODER_NAME,
-            decoder_data=all_data[DECODER_NAME],
-            output_path=f"soft_vs_hard_{DECODER_NAME}.png"
-        )
-    
-    print("\nDone!")
+    # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="unionfind", MAX_ITERATIONS=10_000)
+    main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="ufbfs", MAX_ITERATIONS=10_000)
+
+    # # Configuration
+    # # Physical error rates from 10^-2 (0.01) to 10^-1 (0.1)
+    # # P_BITFLIPS = [0.01, 0.03, 0.05, 0.07, 0.09, 0.1]
+    # P_BITFLIPS = [0.07]
+    # # P_BITFLIPS = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]
+    # DECODERS = ["unionfind"]  # Compare UFBFS and Union Find # ufbfs
+    # D_INNER = 5  # Inner code distance
+    # MAX_ITERATIONS = 1000
+    # N_TRIALS = 1000  # Number of trials per configuration
+    #
+    # # Define outer code (e.g., [3,1] repetition code)
+    # H_outer_code = np.array([
+    #     [1, 1, 0],
+    #     [0, 1, 1]
+    # ])
+    #
+    # # Collect data for all configurations
+    # all_data = {}
+    #
+    # for DECODER_NAME in DECODERS:
+    #     all_data[DECODER_NAME] = {}
+    #
+    #     for P_PHYSICAL in P_BITFLIPS:
+    #         print(f"\n{'='*60}")
+    #         print(f"Collecting data: p={P_PHYSICAL}, decoder={DECODER_NAME}")
+    #         print(f"{'='*60}")
+    #
+    #         results = collect_data(
+    #             p_physical=P_PHYSICAL,
+    #             decoder_name=DECODER_NAME,
+    #             d_inner=D_INNER,
+    #             H_outer=H_outer_code,
+    #             max_iterations=MAX_ITERATIONS,
+    #             n_trials=N_TRIALS
+    #         )
+    #
+    #         all_data[DECODER_NAME][P_PHYSICAL] = results
+    #
+    #         # Print summary
+    #         soft_er = np.mean(results['soft_p_L'])
+    #         hard_er = np.mean(results['hard_p_L'])
+    #         improvement = hard_er / (soft_er + 1e-10)
+    #         print(f"\nSummary for p={P_PHYSICAL}:")
+    #         print(f"  Soft decoding error rate: {soft_er:.6f}")
+    #         print(f"  Hard decoding error rate: {hard_er:.6f}")
+    #         print(f"  Improvement factor: {improvement:.2f}x")
+    #
+    # # Generate separate charts for each decoder
+    # print(f"\n{'='*60}")
+    # print("Generating publication charts...")
+    # print(f"{'='*60}")
+    #
+    # for DECODER_NAME in DECODERS:
+    #     generate_publication_chart(
+    #         decoder_name=DECODER_NAME,
+    #         decoder_data=all_data[DECODER_NAME],
+    #         output_path=f"soft_vs_hard_{DECODER_NAME}.png"
+    #     )
+    #
+    # print("\nDone!")
 
     # for p_bitflip in P_BITFLIPS:
     #     for decoder in DECODERS:

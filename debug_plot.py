@@ -17,6 +17,7 @@
 # print(result)
 
 from qsurface.main import initialize, run
-code, decoder = initialize((6,6), "planar", "unionfind", enabled_errors=["pauli"], plotting=True, initial_states=(0,0))
-run(code, decoder, error_rates = {"p_bitflip": 0.1, "p_phaseflip": 0.1}, decode_initial=False)
+code, decoder = initialize((6,6), "planar", "unionfind", enabled_errors=["pauli"], plotting=False, initial_states=(0,0))
+res = run(code, decoder, error_rates = {"p_bitflip": 0.1, "p_phaseflip": 0.1}, decode_initial=False)
+print(res)
 # TODO(uhasan) remove phase flip
