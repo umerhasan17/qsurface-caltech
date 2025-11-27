@@ -359,89 +359,93 @@ class Toric(Sim):
     """
 
     def grow_clusters(self, **kwargs):
-        """
-            Grows all active (odd-parity) clusters in parallel using BFS,
-            one layer at a time, until all clusters are even (frozen).
-            (Implements Algorithm 1, lines 7-30)
-            """
-
-        # 1. INITIALIZE ACTIVE LIST (Pseudocode lines 1-6, 8)
-        # Get all root clusters that are initially active (odd)
-        active_roots: List[Cluster] = [cluster.find() for cluster in self.clusters if cluster.is_active]
-        # active_roots = {anc.cluster.find() for anc in self.code.ancillas if anc.syndrome}
-
-        while active_roots:
-
-            union_list = []
-            newly_occupied_nodes = []
-
-            # --- 2. GROWTH PHASE (Pseudocode lines 9-10, 14-16) ---
-            # Grow ALL active clusters by one layer simultaneously
-            for cluster_root in active_roots:
-
-                # Use cluster.new_bound, which holds the current boundary edges
-                current_boundary_edges = cluster_root.new_bound
-                cluster_root.new_bound = []  # Clear for next layer
-
-                for ancilla, edge, new_ancilla in current_boundary_edges:
-
-                    new_cluster: Optional[Cluster] = self.get_cluster(new_ancilla)  # This can be None
-
-                    # Check if new_ancilla is part of our own cluster
-                    if new_cluster is not None and new_cluster.find() == cluster_root:
-                        continue
-
-                    # Check if the node is a boundary
-                    is_boundary_node = isinstance(new_ancilla, PseudoQubit)
-
-                    # Check if the node belongs to another cluster *from this instance*
-                    is_other_cluster = (new_cluster is not None and
-                                        new_cluster.instance == self.code.instance)
-
-                    # A node is "occupied" if it's a boundary OR another cluster
-                    if is_boundary_node or is_other_cluster:
-                        # Occupied: Add to list for merge phase (Pseudocode line 11)
-                        union_list.append((ancilla, edge, new_ancilla))
-                    else:
-                        # Unoccupied: claim it (Pseudocode line 15)
-                        self.cluster_add_ancilla(cluster_root, new_ancilla, parent=ancilla)
-                        newly_occupied_nodes.append(new_ancilla)
-
-            # --- 3. FIND NEXT BOUNDARY (INLINED) ---
-            # For all nodes we *just* claimed, find their neighbors
-            # and add those edges to the cluster's *new* boundary list
-            # This replaces the old 'grow_boundary' logic.
-            for node in newly_occupied_nodes:
-                cluster_root = node.cluster.find()
-
-                for cur_direction, (cur_ancilla, edge) in self.get_neighbors(node).items():
-                    neighbor_tuple = self.get_neighbor(node, cur_direction)
-                    neighbor_ancilla = neighbor_tuple[0]
-
-                    # --- REPLACEMENT ---
-                    new_cluster_neighbor = self.get_cluster(neighbor_ancilla)
-
-                    # Check if the neighbor is a boundary (None) or part of another cluster
-                    if new_cluster_neighbor is None:
-                        neighbor_root = None  # It's a boundary
-                    else:
-                        neighbor_root = new_cluster_neighbor.find()
-                    # --- END REPLACEMENT ---
-
-                    if neighbor_root != cluster_root:
-                        # This edge leads to another cluster or a boundary
-                        # Add it to the *root's* boundary list for the *next* iteration
-                        cluster_root.new_bound.append((node, edge, neighbor_ancilla))
-
-            # --- 4. MERGE PHASE (Pseudocode lines 11-13) ---
-            # Call your *unmodified* union_bucket function.
-            # It already handles parity updates correctly.
-            self.union_bucket(union_list)
-
-            # --- 5. UPDATE ACTIVE LIST (Pseudocode line 18-20) ---
-            # Re-calculate the set of active *roots* from *all* clusters
-            # to prepare for the next 'while' loop iteration.
-            active_roots = [c.find() for c in self.clusters if c.find().is_active]
+        if self.config["weighted_growth"]:
+            for bucket_i in range(self.buckets_num):
+                self.bucket_i = bucket_i
+                if bucket_i > self.bucket_max_filled:
+                    break
+                if bucket_i in self.buckets and self.buckets[bucket_i] != []:
+                    union_list, place_list = self.grow_bucket(self.buckets.pop(bucket_i), bucket_i)
+                    self.union_bucket(union_list)
+                    self.place_bucket(place_list, bucket_i)
+        # # Pseudocode line 1: Collect erased edges (e1...ene) and syndrome ancillas (σ1...σns)
+        # L = []
+        # erased_edges = []
+        # if "erasure" in self.code.errors:
+        #     for layer in self.code.data_qubits.values():
+        #         for data_qubit in layer.values():
+        #             if hasattr(data_qubit, "erasure") and data_qubit.erasure == self.code.instance:
+        #                 for edge in data_qubit.edges.values():
+        #                     if edge not in erased_edges:
+        #                         erased_edges.append(edge)
+        #
+        # plaqs, stars = self.get_syndrome()
+        # syndrome_ancillas = plaqs + stars
+        #
+        # # Pseudocode line 1: L = [e1...ene σ1...σns]
+        # for edge in erased_edges:
+        #     for node in edge.nodes:
+        #         if node not in L:
+        #             L.append(node)
+        # for ancilla in syndrome_ancillas:
+        #     if ancilla not in L:
+        #         L.append(ancilla)
+        #
+        # # Pseudocode line 2: i = 0
+        # i = 0
+        #
+        # # Pseudocode line 3: for l in L do v[l] = 1
+        # v = {}
+        # for l in L:
+        #     v[l] = 1
+        #
+        # # Pseudocode line 5: while there is an invalid cluster do
+        # while True:
+        #     has_invalid_cluster = False
+        #     for cluster in self.clusters:
+        #         if cluster.find().is_active:
+        #             has_invalid_cluster = True
+        #             break
+        #     if not has_invalid_cluster:
+        #         break
+        #
+        #     if i >= len(L):
+        #         break
+        #
+        #     # Pseudocode line 6: for all neighbors n of L[i] do
+        #     current_node = L[i]
+        #     current_cluster = self.get_cluster(current_node)
+        #     if current_cluster is None:
+        #         i += 1
+        #         continue
+        #     current_root = current_cluster.find()
+        #
+        #     neighbors = self.get_neighbors(current_node)
+        #     for neighbor_tuple in neighbors.values():
+        #         neighbor_ancilla = neighbor_tuple[0]
+        #         neighbor_cluster = self.get_cluster(neighbor_ancilla)
+        #
+        #         # Pseudocode line 7: if root(L[i]) != root(n) then
+        #         if neighbor_cluster is None:
+        #             neighbor_root = None
+        #         else:
+        #             neighbor_root = neighbor_cluster.find()
+        #
+        #         if current_root != neighbor_root:
+        #             # Pseudocode line 8: merge(root(L[i]), root(n))
+        #             if neighbor_cluster is not None and neighbor_cluster.instance == self.code.instance:
+        #                 if self.config["weighted_union"] and current_root.size < neighbor_root.size:
+        #                     neighbor_root.union(current_root)
+        #                 else:
+        #                     current_root.union(neighbor_root)
+        #
+        #             # Pseudocode lines 9-10: if v[n] = 0 then add n to L, v[n] = 1
+        #             if neighbor_ancilla not in v or v[neighbor_ancilla] == 0:
+        #                 L.append(neighbor_ancilla)
+        #                 v[neighbor_ancilla] = 1
+        #
+        #     # Pseudocode line 12: i = i + 1
+        #     i += 1
 
     def grow_bucket(self, bucket: List[Cluster], bucket_i: int, **kwargs) -> Tuple[List, List]:
         """Grows the clusters which are contained in the current bucket.
@@ -514,40 +518,34 @@ class Toric(Sim):
     """
 
     def union_bucket(self, union_list: List[Tuple[AncillaQubit, Edge, AncillaQubit]], **kwargs):
-        """Merges clusters, handling boundaries (Pseudocode lines 11-13)."""
+        """Merges clusters in ``union_list`` if checks are passed.
+
+        Items in ``union_list`` consists of ``[ancillaA, edge, ancillaB]`` of two ancillas that, at the time added to the list, were not part of the same cluster. The cluster of an ancilla is stored at ``ancilla.cluster``, but due to cluster mergers the cluster at ``ancilla_cluster`` may not be the root element in the cluster-tree, and thus the cluster must be requested by ``ancilla.cluster.`` `~.unionfind.elements.Cluster.find`. Since the clusters of ``ancillaA`` and ``ancillaB`` may have already merged, checks are performed in `union_check` after which the clusters are conditionally merged on ``edge`` by `union_edge`.
+
+        If ``weighted_union`` is enabled, the smaller cluster is always made a child of the bigger cluster in the cluster-tree. This ensures the that the depth of the tree is minimized and the future calls to `~.unionfind.elements.Cluster.find` is reduced.
+
+        If ``dynamic_forest`` is disabled, cycles within clusters are not immediately removed. The acyclic forest is then later constructed before peeling in `peel_leaf`.
+
+        Parameters
+        ----------
+        union_list
+            List of potential mergers between two cluster-distinct ancillas.
+        """
         if union_list and self.config["print_steps"]:
             print("Cluster unions.")
 
         for ancilla, edge, new_ancilla in union_list:
-            cluster_root = self.get_cluster(ancilla).find()
-            new_cluster = self.get_cluster(new_ancilla)  # This can be None
+            cluster = self.get_cluster(ancilla)
+            new_cluster = self.get_cluster(new_ancilla)
 
-            if new_cluster is None:
-                # --- THIS IS A BOUNDARY MERGE ---
-                # This ancilla is a PseudoQubit (boundary)
-                if not cluster_root.on_bound:
-                    cluster_root.on_bound = True
-                    if self.config["print_steps"]:
-                        print(f"{cluster_root} hit boundary, now frozen.")
+            if self.union_check(edge, ancilla, new_ancilla, cluster, new_cluster):
+                string = "{}∪{}=".format(cluster, new_cluster) if self.config["print_steps"] else ""
 
-            else:
-                # --- THIS IS A CLUSTER-CLUSTER MERGE ---
-                new_cluster_root = new_cluster.find()
-                if cluster_root != new_cluster_root:
-
-                    string = "{}∪{}=".format(cluster_root, new_cluster_root) if self.config["print_steps"] else ""
-
-                    # Your .union() method already handles parity, size, etc.
-                    # Just make sure to merge the roots correctly.
-                    if self.config["weighted_union"] and cluster_root.size < new_cluster_root.size:
-                        new_cluster_root.union(cluster_root)  # Merges cluster into new_cluster
-                        if string: print(string, new_cluster_root)
-                    else:
-                        cluster_root.union(new_cluster_root)  # Merges new_cluster into cluster
-                        if string: print(string, cluster_root)
-
-                elif self.config["dynamic_forest"]:
-                    self._edge_peel(edge, variant="cycle")
+                if self.config["weighted_union"] and cluster.size < new_cluster.size:
+                    cluster, new_cluster = new_cluster, cluster
+                cluster.union(new_cluster)
+                if string:
+                    print(string, cluster)
 
         if union_list and self.config["print_steps"]:
             print("")
