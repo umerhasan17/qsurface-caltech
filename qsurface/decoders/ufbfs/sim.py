@@ -127,6 +127,7 @@ class Toric(Sim):
         self.bucket_max_filled = 0
         self.cluster_index = 0
         self.clusters = []
+        self.skipped_nodes = defaultdict(list)  # the L' list of lists in the algorithm
         self.support = {edge: 0 for edge in self.support}
         self.find_clusters(**kwargs)
         self.grow_clusters(**kwargs)
@@ -364,88 +365,88 @@ class Toric(Sim):
                 self.bucket_i = bucket_i
                 if bucket_i > self.bucket_max_filled:
                     break
-                if bucket_i in self.buckets and self.buckets[bucket_i] != []:
-                    union_list, place_list = self.grow_bucket(self.buckets.pop(bucket_i), bucket_i)
-                    self.union_bucket(union_list)
-                    self.place_bucket(place_list, bucket_i)
-        # # Pseudocode line 1: Collect erased edges (e1...ene) and syndrome ancillas (σ1...σns)
-        # L = []
-        # erased_edges = []
-        # if "erasure" in self.code.errors:
-        #     for layer in self.code.data_qubits.values():
-        #         for data_qubit in layer.values():
-        #             if hasattr(data_qubit, "erasure") and data_qubit.erasure == self.code.instance:
-        #                 for edge in data_qubit.edges.values():
-        #                     if edge not in erased_edges:
-        #                         erased_edges.append(edge)
-        #
-        # plaqs, stars = self.get_syndrome()
-        # syndrome_ancillas = plaqs + stars
-        #
-        # # Pseudocode line 1: L = [e1...ene σ1...σns]
-        # for edge in erased_edges:
-        #     for node in edge.nodes:
-        #         if node not in L:
-        #             L.append(node)
-        # for ancilla in syndrome_ancillas:
-        #     if ancilla not in L:
-        #         L.append(ancilla)
-        #
-        # # Pseudocode line 2: i = 0
-        # i = 0
-        #
-        # # Pseudocode line 3: for l in L do v[l] = 1
-        # v = {}
-        # for l in L:
-        #     v[l] = 1
-        #
-        # # Pseudocode line 5: while there is an invalid cluster do
-        # while True:
-        #     has_invalid_cluster = False
-        #     for cluster in self.clusters:
-        #         if cluster.find().is_active:
-        #             has_invalid_cluster = True
-        #             break
-        #     if not has_invalid_cluster:
-        #         break
-        #
-        #     if i >= len(L):
-        #         break
-        #
-        #     # Pseudocode line 6: for all neighbors n of L[i] do
-        #     current_node = L[i]
-        #     current_cluster = self.get_cluster(current_node)
-        #     if current_cluster is None:
-        #         i += 1
-        #         continue
-        #     current_root = current_cluster.find()
-        #
-        #     neighbors = self.get_neighbors(current_node)
-        #     for neighbor_tuple in neighbors.values():
-        #         neighbor_ancilla = neighbor_tuple[0]
-        #         neighbor_cluster = self.get_cluster(neighbor_ancilla)
-        #
-        #         # Pseudocode line 7: if root(L[i]) != root(n) then
-        #         if neighbor_cluster is None:
-        #             neighbor_root = None
-        #         else:
-        #             neighbor_root = neighbor_cluster.find()
-        #
-        #         if current_root != neighbor_root:
-        #             # Pseudocode line 8: merge(root(L[i]), root(n))
-        #             if neighbor_cluster is not None and neighbor_cluster.instance == self.code.instance:
-        #                 if self.config["weighted_union"] and current_root.size < neighbor_root.size:
-        #                     neighbor_root.union(current_root)
-        #                 else:
-        #                     current_root.union(neighbor_root)
-        #
-        #             # Pseudocode lines 9-10: if v[n] = 0 then add n to L, v[n] = 1
-        #             if neighbor_ancilla not in v or v[neighbor_ancilla] == 0:
-        #                 L.append(neighbor_ancilla)
-        #                 v[neighbor_ancilla] = 1
-        #
-        #     # Pseudocode line 12: i = i + 1
-        #     i += 1
+
+                current_node = None
+                root_of_current_node = None
+                root_of_current_node_is_invalid: bool = True
+
+                if bucket_i in self.buckets and self.buckets[bucket_i] != [] and root_of_current_node_is_invalid:
+
+                    bucket: List[Cluster] = self.buckets.pop(bucket_i)
+
+                    ## Grow bucket implementation
+                    if self.config["print_steps"]:
+                        string = f"Growing bucket {bucket_i} of clusters:"
+                        print("=" * len(string) + "\n" + string)
+
+                    union_list, place_list = [], []
+                    while bucket:  # Loop over all clusters in the current bucket\
+                        cluster = bucket.pop().find()
+                        if cluster.bucket == bucket_i and cluster.support == bucket_i % 2:
+                            place_list.append(cluster)
+
+                            # Grow boundary implementation
+                            cluster.support = 1 - cluster.support
+                            cluster.bound, cluster.new_bound = cluster.new_bound, []
+
+                            while cluster.bound:  # grow boundary
+                                boundary = cluster.bound.pop()
+                                new_edge = boundary[1]
+
+                                if self.support[new_edge] != 2:  # if not already fully grown
+                                    self._edge_grow(*boundary)  # Grow boundaries by half-edge
+                                    if self.support[new_edge] == 2:  # if edge is fully grown
+                                        union_list.append(boundary)  # Append to union_list list of edges
+                                    else:
+                                        cluster.new_bound.append(boundary)
+
+                            if self.config["print_steps"]:
+                                print(f"{cluster}, ", end="")
+
+
+                    if self.config["print_steps"]:
+                        print("\n")
+
+                    # Union bucket implementation
+                    if union_list and self.config["print_steps"]:
+                        print("Cluster unions.")
+
+                    for ancilla, edge, new_ancilla in union_list:
+                        cluster = self.get_cluster(ancilla)
+                        new_cluster = self.get_cluster(new_ancilla)
+
+                        if self.union_check(edge, ancilla, new_ancilla, cluster, new_cluster):
+                            string = "{}∪{}=".format(cluster, new_cluster) if self.config["print_steps"] else ""
+
+                            if self.config["weighted_union"] and cluster.size < new_cluster.size:
+                                cluster, new_cluster = new_cluster, cluster
+                            cluster.union(new_cluster)
+                            if string:
+                                print(string, cluster)
+
+                    if union_list and self.config["print_steps"]:
+                        print("")
+
+                    for cluster in place_list:
+
+                        cluster = cluster.find()
+
+                        if cluster.parity % 2 == 1:
+                            if self.config["weighted_growth"]:
+                                cluster.bucket = 2 * (cluster.size - 1) + cluster.support
+                                self.buckets[cluster.bucket].append(cluster)
+                                if cluster.bucket > self.bucket_max_filled:
+                                    self.bucket_max_filled = cluster.bucket
+                            else:
+                                self.buckets[0].append(cluster)
+                                cluster.bucket = bucket_i + 1
+                        else:
+                            cluster.bucket = None
+
+                else:
+                    # Append L[i] to L' root(L[i])
+                    self.skipped_nodes[root_of_current_node].append(current_node)
+                    pass
 
     def grow_bucket(self, bucket: List[Cluster], bucket_i: int, **kwargs) -> Tuple[List, List]:
         """Grows the clusters which are contained in the current bucket.
@@ -466,21 +467,7 @@ class Toric(Sim):
         list
             List of odd-parity clusters to be placed in new buckets.
         """
-        if self.config["print_steps"]:
-            string = f"Growing bucket {bucket_i} of clusters:"
-            print("=" * len(string) + "\n" + string)
-
-        union_list, place_list = [], []
-        while bucket:  # Loop over all clusters in the current bucket\
-            cluster = bucket.pop().find()
-            if cluster.bucket == bucket_i and cluster.support == bucket_i % 2:
-                place_list.append(cluster)
-                self.grow_boundary(cluster, union_list)
-
-        if self.config["print_steps"]:
-            print("\n")
-
-        return union_list, place_list
+        raise NotImplementedError
 
     def grow_boundary(self, cluster: Cluster, union_list: List[Tuple[AncillaQubit, Edge, AncillaQubit]], **kwargs):
         """Grows the boundary of the ``cluster``.
@@ -494,22 +481,7 @@ class Toric(Sim):
         union_list
             List of potential mergers between two cluster-distinct ancillas.
         """
-        cluster.support = 1 - cluster.support
-        cluster.bound, cluster.new_bound = cluster.new_bound, []
-
-        while cluster.bound:  # grow boundary
-            boundary = cluster.bound.pop()
-            new_edge = boundary[1]
-
-            if self.support[new_edge] != 2:  # if not already fully grown
-                self._edge_grow(*boundary)  # Grow boundaries by half-edge
-                if self.support[new_edge] == 2:  # if edge is fully grown
-                    union_list.append(boundary)  # Append to union_list list of edges
-                else:
-                    cluster.new_bound.append(boundary)
-
-        if self.config["print_steps"]:
-            print(f"{cluster}, ", end="")
+        raise NotImplementedError
 
     """
     -------------------------------------------------------------------------------------------
@@ -531,24 +503,7 @@ class Toric(Sim):
         union_list
             List of potential mergers between two cluster-distinct ancillas.
         """
-        if union_list and self.config["print_steps"]:
-            print("Cluster unions.")
-
-        for ancilla, edge, new_ancilla in union_list:
-            cluster = self.get_cluster(ancilla)
-            new_cluster = self.get_cluster(new_ancilla)
-
-            if self.union_check(edge, ancilla, new_ancilla, cluster, new_cluster):
-                string = "{}∪{}=".format(cluster, new_cluster) if self.config["print_steps"] else ""
-
-                if self.config["weighted_union"] and cluster.size < new_cluster.size:
-                    cluster, new_cluster = new_cluster, cluster
-                cluster.union(new_cluster)
-                if string:
-                    print(string, cluster)
-
-        if union_list and self.config["print_steps"]:
-            print("")
+        raise NotImplementedError
 
     def union_check(
         self,
@@ -589,21 +544,7 @@ class Toric(Sim):
         bucket_i
             Current bucket number.
         """
-        for cluster in clusters:
-
-            cluster = cluster.find()
-
-            if cluster.parity % 2 == 1:
-                if self.config["weighted_growth"]:
-                    cluster.bucket = 2 * (cluster.size - 1) + cluster.support
-                    self.buckets[cluster.bucket].append(cluster)
-                    if cluster.bucket > self.bucket_max_filled:
-                        self.bucket_max_filled = cluster.bucket
-                else:
-                    self.buckets[0].append(cluster)
-                    cluster.bucket = bucket_i + 1
-            else:
-                cluster.bucket = None
+        raise NotImplementedError
 
     """
     -------------------------------------------------------------------------------------------
