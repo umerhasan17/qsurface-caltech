@@ -427,21 +427,7 @@ class Toric(Sim):
                     if union_list and self.config["print_steps"]:
                         print("")
 
-                    for cluster in place_list:
-
-                        cluster = cluster.find()
-
-                        if cluster.parity % 2 == 1:
-                            if self.config["weighted_growth"]:
-                                cluster.bucket = 2 * (cluster.size - 1) + cluster.support
-                                self.buckets[cluster.bucket].append(cluster)
-                                if cluster.bucket > self.bucket_max_filled:
-                                    self.bucket_max_filled = cluster.bucket
-                            else:
-                                self.buckets[0].append(cluster)
-                                cluster.bucket = bucket_i + 1
-                        else:
-                            cluster.bucket = None
+                    self.place_bucket(clusters=place_list, bucket_i=bucket_i)
 
                 else:
                     # Append L[i] to L' root(L[i])

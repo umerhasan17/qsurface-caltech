@@ -542,7 +542,7 @@ if __name__ == "__main__":
 
     for decoder_name in ["unionfind", "ufbfs"]:
         for p_physical in [0.06, 0.08, 0.1, 0.12, 0.16, 0.2]:
-            avg_phi, log_likelihood_per_bin, counts = main_inner_code(P_PHYSICAL=p_physical, DECODER_NAME=decoder_name, MAX_ITERATIONS=5_000)
+            avg_phi, log_likelihood_per_bin, counts = main_inner_code(P_PHYSICAL=p_physical, DECODER_NAME=decoder_name, MAX_ITERATIONS=1_000)
             results_dict[(decoder_name, p_physical)] = [avg_phi, log_likelihood_per_bin, counts]
 
     import matplotlib.pyplot as plt
