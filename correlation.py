@@ -490,7 +490,7 @@ def main_inner_code(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
     Main function for single trial (kept for backward compatibility).
     """
     # 2. DEFINE INNER CODE PARAMETERS
-    D_INNER = 5
+    D_INNER = 10
     N_INNER = 1
 
     # 3. GET INNER DECODER RESULTS
@@ -511,21 +511,13 @@ def main_inner_code(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
 
     avg_phi, log_likelihood_per_bin, counts = estimate_pL_vs_phi(phis=inner_phi_scores, Ls=inner_hard_decisions, bin_edges=np.linspace(0, 20, 20))
 
-    import matplotlib.pyplot as plt
-    plt.plot(avg_phi, log_likelihood_per_bin, marker='o', linestyle='none')
-    plt.xlabel("soft output phi (binned)")
-    plt.ylabel("log likelihood logical error rate p_L")
-    plt.show()
 
     # log_prob_correct = np.sum([log_prob_zero(llr) for llr in final_llrs])
     # p_L_outer = -np.expm1(log_prob_correct)
     # p_L_outer = np.clip(p_L_outer, 1e-15, 1.0 - 1e-15)
     #
     # log_likelihood_of_failure = np.log((1.0 - p_L_outer) / p_L_outer)
-
-    return 0
-
-
+    return avg_phi, log_likelihood_per_bin, counts
     #
     # print("---------------------------------------")
     # print(f"Final Corrected Codeword: {final_code_word}")
@@ -544,8 +536,52 @@ def main_inner_code(P_PHYSICAL, DECODER_NAME, MAX_ITERATIONS):
 
 
 if __name__ == "__main__":
-    # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="unionfind", MAX_ITERATIONS=10_000)
-    main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="ufbfs", MAX_ITERATIONS=10_000)
+    np.random.seed(42)
+
+    results_dict = {}
+
+    for decoder_name in ["unionfind", "ufbfs"]:
+        for p_physical in [0.06, 0.08, 0.1, 0.12, 0.16, 0.2]:
+            avg_phi, log_likelihood_per_bin, counts = main_inner_code(P_PHYSICAL=p_physical, DECODER_NAME=decoder_name, MAX_ITERATIONS=5_000)
+            results_dict[(decoder_name, p_physical)] = [avg_phi, log_likelihood_per_bin, counts]
+
+    import matplotlib.pyplot as plt
+
+    for decoder_name in ["unionfind", "ufbfs"]:
+        # Get all unique p_physical values for this decoder
+        p_physical_values = sorted(set([p for (d, p) in results_dict.keys() if d == decoder_name]))
+
+
+        # Plot one line per p_physical
+        for p_physical in p_physical_values:
+            avg_phi, log_likelihood_per_bin, counts = results_dict[(decoder_name, p_physical)]
+
+            # Filter out invalid values (inf, nan)
+            valid_mask = np.isfinite(avg_phi) & np.isfinite(log_likelihood_per_bin)
+            avg_phi_valid = avg_phi[valid_mask]
+            log_likelihood_valid = log_likelihood_per_bin[valid_mask]
+
+            # Plot data points
+            line_handle = plt.plot(avg_phi_valid, log_likelihood_valid, marker='o', linestyle='none',label=f'p={p_physical}')
+            point_color = line_handle[0].get_color()
+
+            # Fit a line (linear regression)
+            if len(avg_phi_valid) > 1:
+                # Fit polynomial of degree 1 (straight line)
+                coeffs = np.polyfit(avg_phi_valid, log_likelihood_valid, 1)
+                # Generate points for the fitted line
+                phi_fit = np.linspace(avg_phi_valid.min(), avg_phi_valid.max(), 100)
+                log_likelihood_fit = np.polyval(coeffs, phi_fit)
+                # Plot the fitted line
+                plt.plot(phi_fit, log_likelihood_fit, linestyle='--', alpha=0.7, linewidth=1.5, color=point_color)
+
+        plt.xlabel("soft output phi (binned)")
+        plt.ylabel("log likelihood logical error rate p_L")
+        plt.title(f"Correlation for decoder: {decoder_name}")
+        plt.legend()
+        plt.show()
+        # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="ufbfs", MAX_ITERATIONS=1_000)
+        # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="unionfind", MAX_ITERATIONS=1_000)
 
     # # Configuration
     # # Physical error rates from 10^-2 (0.01) to 10^-1 (0.1)
