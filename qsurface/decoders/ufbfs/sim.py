@@ -339,173 +339,157 @@ class Toric(Sim):
     """
 
     def grow_clusters(self, **kwargs):
+        # Algorithm 2: Union-Find with skipped nodes (L')
+        # Line 1: L = [e1...ene σ1...σns] (for 0 erasure rate: only non-zero syndromes)
         plaqs, _ = self.get_syndrome()
-        L = list(plaqs)  # List of ancillas to process
-        visited = set()  # Track visited ancillas
+        L = list(plaqs)
         i = 0
-        iteration_count = 0
-        max_iterations = 10000  # Safety limit
 
         if self.config["print_steps"]:
-            print(f"Starting grow_clusters with {len(L)} initial ancillas")
-            print(f"Initial clusters: {len(self.clusters)}")
-            for c in self.clusters:
+            print(f"\n{'='*60}")
+            print(f"Starting grow_clusters: {len(L)} initial ancillas")
+            invalid_clusters = [c for c in self.clusters if c.find().parity % 2 == 1 and not c.find().on_bound]
+            print(f"Initial invalid clusters: {len(invalid_clusters)}")
+            for c in invalid_clusters:
                 root = c.find()
-                print(f"  Cluster {root.index}: size={root.size}, parity={root.parity}, on_bound={root.on_bound}")
+                print(f"  Cluster {root.index}: size={root.size}, parity={root.parity}, support={root.support}, bound={len(root.bound)}, new_bound={len(root.new_bound)}")
+            print(f"{'='*60}\n")
 
-        # While there is an invalid cluster
-        while True:
-            iteration_count += 1
-            if iteration_count > max_iterations:
-                if self.config["print_steps"]:
-                    print(f"WARNING: Exceeded max_iterations ({max_iterations}), breaking")
-                break
-
-            if self.config["print_steps"] and iteration_count % 100 == 0:
-                print(f"\nIteration {iteration_count}: i={i}, L_size={len(L)}, visited={len(visited)}")
-
-            # Check if any cluster is invalid (odd parity, not on boundary)
-            invalid_clusters = [
-                c for c in self.clusters
-                if c.find().parity % 2 == 1 and not c.find().on_bound
-            ]
-            invalid_exists = len(invalid_clusters) > 0
-
-            if self.config["print_steps"] and iteration_count % 50 == 0:
-                print(f"  Invalid clusters: {len(invalid_clusters)}")
-                for c in invalid_clusters[:3]:
-                    root = c.find()
-                    print(f"    Cluster {root.index}: parity={root.parity}")
-
-            if not invalid_exists and i >= len(L):
-                if self.config["print_steps"]:
-                    print(f"Breaking: no invalid clusters and i >= len(L) (i={i}, len(L)={len(L)})")
-                break
-
-            # Get next ancilla to process
-            if i >= len(L):
-                if self.config["print_steps"]:
-                    print(f"  L exhausted at i={i}, searching for ancilla from invalid cluster")
-                # Find an ancilla from an invalid cluster
-                found_ancilla = False
-                for cluster in self.clusters:
-                    root = cluster.find()
-                    if root.parity % 2 == 1 and not root.on_bound:
-                        # Find an ancilla in this cluster
-                        for layer in self.code.ancilla_qubits.values():
-                            for ancilla in layer.values():
-                                if (ancilla.cluster and
-                                        ancilla.cluster.find() == root and
-                                        ancilla not in visited):
-                                    L.append(ancilla)
-                                    visited.add(ancilla)
-                                    found_ancilla = True
-                                    if self.config["print_steps"]:
-                                        print(f"    Added ancilla {ancilla.loc} from cluster {root.index} to L")
-                                    break
-                            if found_ancilla:
-                                break
-                        if found_ancilla:
-                            break
-                if not found_ancilla:
-                    if self.config["print_steps"]:
-                        print(f"  No more ancillas found, breaking")
-                    break
-
-            if i >= len(L):
-                if self.config["print_steps"]:
-                    print(f"Breaking: i={i} >= len(L)={len(L)}")
-                break
-
+        # Line 2: for l in L do
+        while i < len(L):
             current_ancilla = L[i]
+            # Line 3: v[l] = 1 (implicitly handled by processing)
             root_cluster = current_ancilla.cluster.find() if current_ancilla.cluster else None
 
-            if self.config["print_steps"] and iteration_count % 20 == 0:
-                print(
-                    f"  Processing L[{i}]: ancilla at {current_ancilla.loc}, root_cluster={root_cluster.index if root_cluster else None}")
+            if self.config["print_steps"]:
+                print(f"L[{i}]/{len(L)}: Processing ancilla at {current_ancilla.loc}, root_cluster={root_cluster.index if root_cluster else None}")
 
-            # Check if root(L[i]) is invalid
+            # Line 4: if root(l) is invalid then
             if root_cluster and root_cluster.parity % 2 == 1 and not root_cluster.on_bound:
-                if self.config["print_steps"] and iteration_count % 20 == 0:
-                    print(f"    Root cluster {root_cluster.index} is invalid (parity={root_cluster.parity})")
+                if self.config["print_steps"]:
+                    print(f"  Cluster {root_cluster.index} is INVALID: parity={root_cluster.parity}, on_bound={root_cluster.on_bound}, support={root_cluster.support}")
+                    print(f"    Boundary: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}")
+                # Ensure boundary is populated before growing
+                if not root_cluster.bound and not root_cluster.new_bound:
+                    # Boundary is empty: populate from all ancillas in cluster
+                    if self.config["print_steps"]:
+                        print(f"    Populating empty boundary from all ancillas in cluster")
+                    boundary_count = 0
+                    for layer in self.code.ancilla_qubits.values():
+                        for ancilla in layer.values():
+                            if ancilla.cluster and ancilla.cluster.find() == root_cluster:
+                                neighbors = self.get_neighbors(ancilla)
+                                for new_ancilla, edge in neighbors.values():
+                                    new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
+                                    if root_cluster != new_root:
+                                        boundary_tuple = (ancilla, edge, new_ancilla)
+                                        if boundary_tuple not in root_cluster.new_bound and self.support[edge] != 2:
+                                            root_cluster.new_bound.append(boundary_tuple)
+                                            boundary_count += 1
+                    if self.config["print_steps"]:
+                        print(f"    Added {boundary_count} edges to new_bound")
+                elif root_cluster.support != 0:
+                    # Boundary exists but support != 0: add neighbors of current_ancilla if not already there
+                    if self.config["print_steps"]:
+                        print(f"    Adding neighbors of current_ancilla to boundary")
+                    added_count = 0
+                    neighbors = self.get_neighbors(current_ancilla)
+                    for new_ancilla, edge in neighbors.values():
+                        new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
+                        if root_cluster != new_root:
+                            boundary_tuple = (current_ancilla, edge, new_ancilla)
+                            if boundary_tuple not in root_cluster.new_bound and boundary_tuple not in root_cluster.bound and self.support[edge] != 2:
+                                root_cluster.new_bound.append(boundary_tuple)
+                                added_count += 1
+                    if self.config["print_steps"]:
+                        print(f"    Added {added_count} new edges to new_bound")
 
-                # First, add neighbors of current_ancilla to boundary if not already there
-                neighbors = self.get_neighbors(current_ancilla)
-                for new_ancilla, edge in neighbors.values():
+                # Line 5-17: grow boundary and merge clusters
+                union_list = []
+                growth_iter = 0
+                while root_cluster.bound or root_cluster.new_bound:
+                    growth_iter += 1
+                    if self.config["print_steps"]:
+                        print(f"    Growth iteration {growth_iter}: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}, support={root_cluster.support}")
+                    self.grow_boundary(root_cluster, union_list)
+                    root_cluster = root_cluster.find()
+                    if self.config["print_steps"]:
+                        print(f"      After growth: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}, union_list={len(union_list)}, parity={root_cluster.parity}")
+                    # Break if cluster becomes valid (even parity or on boundary)
+                    if root_cluster.parity % 2 == 0 or root_cluster.on_bound:
+                        if self.config["print_steps"]:
+                            print(f"    Cluster {root_cluster.index} became VALID (parity={root_cluster.parity}, on_bound={root_cluster.on_bound})")
+                        break
+
+                # Line 18-25: process union_list (merged clusters)
+                if self.config["print_steps"]:
+                    print(f"    Processing {len(union_list)} unions")
+                for ancilla, edge, new_ancilla in union_list:
                     new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
-                    
                     if root_cluster != new_root:
-                        # Add to boundary if not already there and edge not fully grown
-                        boundary_tuple = (current_ancilla, edge, new_ancilla)
-                        if boundary_tuple not in root_cluster.new_bound and self.support[edge] != 2:
-                            root_cluster.new_bound.append(boundary_tuple)
-                
-                # Grow the boundary of the cluster (similar to grow_boundary)
-                root_cluster.support = 1 - root_cluster.support
-                root_cluster.bound, root_cluster.new_bound = root_cluster.new_bound, []
-                
-                # Grow edges in the boundary
-                while root_cluster.bound:
-                    boundary = root_cluster.bound.pop()
-                    ancilla_bound, edge, new_ancilla_bound = boundary
-                    
-                    if self.support[edge] != 2:
-                        self._edge_grow(ancilla_bound, edge, new_ancilla_bound)
-                        if self.support[edge] == 2:
-                            # Edge is fully grown, can merge
-                            new_root_bound = new_ancilla_bound.cluster.find() if new_ancilla_bound.cluster else None
-                            if root_cluster != new_root_bound:
-                                # Check if L'[root(n)] is not empty (line 19-21)
-                                if new_root_bound and id(new_root_bound) in self.skipped_nodes:
-                                    skipped = self.skipped_nodes[id(new_root_bound)]
-                                    if skipped:
-                                        if self.config["print_steps"]:
-                                            print(f"      Adding {len(skipped)} skipped nodes from cluster {new_root_bound.index} to L")
-                                        L.extend(skipped)
-                                        self.skipped_nodes[id(new_root_bound)] = []
-                                
-                                # Merge clusters (line 22) - use cluster.union method
-                                if new_root_bound:
-                                    if self.config["print_steps"] and iteration_count % 20 == 0:
-                                        print(f"      Merging cluster {root_cluster.index} with {new_root_bound.index}")
-                                    
-                                    if self.config["weighted_union"] and root_cluster.size < new_root_bound.size:
-                                        root_cluster, new_root_bound = new_root_bound, root_cluster
-                                    
-                                    root_cluster.union(new_root_bound)
-                                    
-                                    for layer in self.code.ancilla_qubits.values():
-                                        for anc in layer.values():
-                                            if anc.cluster and anc.cluster.find() == new_root_bound:
-                                                anc.cluster = root_cluster
-                                    
-                                    if new_ancilla_bound not in visited:
-                                        L.append(new_ancilla_bound)
-                                        visited.add(new_ancilla_bound)
-                        else:
-                            # Edge is half-grown, add back to new_bound
-                            root_cluster.new_bound.append(boundary)
-                
-                # Add neighbors to L if not visited (line 23-25)
+                        # Line 19-21: if L'[root(n)] is not empty then
+                        if new_root and id(new_root) in self.skipped_nodes:
+                            skipped = self.skipped_nodes[id(new_root)]
+                            if skipped:
+                                if self.config["print_steps"]:
+                                    print(f"      Adding {len(skipped)} skipped nodes from cluster {new_root.index} to L")
+                                # Line 20: L.append(L'[root(n)])
+                                L.extend(skipped)
+                                # Line 21: L'[root(n)] = []
+                                self.skipped_nodes[id(new_root)] = []
+
+                        # Line 22: Union(root(l), root(n))
+                        if new_root:
+                            if self.config["print_steps"]:
+                                print(f"      Union: cluster {root_cluster.index} (size={root_cluster.size}, parity={root_cluster.parity}) ∪ cluster {new_root.index} (size={new_root.size}, parity={new_root.parity})")
+                            root_cluster.union(new_root)
+                            
+                            # Update cluster references after union
+                            for layer in self.code.ancilla_qubits.values():
+                                for anc in layer.values():
+                                    if anc.cluster and anc.cluster.find() == new_root:
+                                        anc.cluster = root_cluster
+                            
+                            # Add merged ancilla to L for processing
+                            if new_ancilla not in L:
+                                L.append(new_ancilla)
+                            
+                            root_cluster = root_cluster.find()
+                            if self.config["print_steps"]:
+                                print(f"        Result: cluster {root_cluster.index} (size={root_cluster.size}, parity={root_cluster.parity}, on_bound={root_cluster.on_bound})")
+
+                # Line 23-25: for each neighbor n of l, if root(n) != root(l) then append n to L
+                neighbors = self.get_neighbors(current_ancilla)
+                added_neighbors = 0
                 for new_ancilla, edge in neighbors.values():
                     new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
-                    if root_cluster != new_root and new_ancilla not in visited:
+                    if root_cluster != new_root and new_ancilla not in L:
                         L.append(new_ancilla)
-                        visited.add(new_ancilla)
+                        added_neighbors += 1
+                if self.config["print_steps"]:
+                    print(f"    Added {added_neighbors} neighbors to L (L now has {len(L)} items)")
             else:
-                # root(L[i]) is valid - append to L'[root(L[i])] (line 27)
+                # Line 27: else append l to L'[root(l)]
                 if root_cluster:
-                    if self.config["print_steps"] and iteration_count % 20 == 0:
-                        print(f"    Root cluster {root_cluster.index} is valid, adding to skipped_nodes")
+                    if self.config["print_steps"]:
+                        print(f"  Cluster {root_cluster.index} is VALID: parity={root_cluster.parity}, on_bound={root_cluster.on_bound}")
+                        print(f"    Adding to skipped_nodes (L'[{root_cluster.index}] now has {len(self.skipped_nodes[id(root_cluster)]) + 1} items)")
                     self.skipped_nodes[id(root_cluster)].append(current_ancilla)
-
+            
             i += 1
 
         if self.config["print_steps"]:
-            print(f"\nFinished grow_clusters after {iteration_count} iterations")
-            print(f"Final: i={i}, L_size={len(L)}, visited={len(visited)}")
+            print(f"\n{'='*60}")
+            print(f"Finished grow_clusters: processed {i} ancillas, L_size={len(L)}")
             final_invalid = [c for c in self.clusters if c.find().parity % 2 == 1 and not c.find().on_bound]
             print(f"Final invalid clusters: {len(final_invalid)}")
+            if final_invalid:
+                for c in final_invalid[:5]:
+                    root = c.find()
+                    print(f"  Cluster {root.index}: size={root.size}, parity={root.parity}, on_bound={root.on_bound}")
+            total_skipped = sum(len(v) for v in self.skipped_nodes.values())
+            print(f"Total skipped nodes (L'): {total_skipped}")
+            print(f"{'='*60}\n")
 
         #
         # if self.config["weighted_growth"]:
@@ -618,7 +602,26 @@ class Toric(Sim):
         union_list
             List of potential mergers between two cluster-distinct ancillas.
         """
-        raise NotImplementedError
+        cluster.support = 1 - cluster.support
+        cluster.bound, cluster.new_bound = cluster.new_bound, []
+
+        edges_grown = 0
+        edges_fully_grown = 0
+        while cluster.bound:
+            boundary = cluster.bound.pop()
+            new_edge = boundary[1]
+
+            if self.support[new_edge] != 2:
+                self._edge_grow(*boundary)
+                edges_grown += 1
+                if self.support[new_edge] == 2:
+                    union_list.append(boundary)
+                    edges_fully_grown += 1
+                else:
+                    cluster.new_bound.append(boundary)
+
+        if self.config["print_steps"]:
+            print(f"        Cluster {cluster.index}: grew {edges_grown} edges, {edges_fully_grown} fully grown, {len(cluster.new_bound)} half-grown remaining")
 
     """
     -------------------------------------------------------------------------------------------

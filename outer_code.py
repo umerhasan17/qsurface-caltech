@@ -496,11 +496,13 @@ if __name__ == '__main__':
     n_outer = Hz.shape[1]
 
     p_vals_hard = np.linspace(0.055, 0.075, 8)
+    decoder_name = "unionfind"
+    # decoder_name = "ufbfs"
 
     fail_hard = simulate_outer_hard_uniform_prior(
         code,
         p_vals_hard,
-        decoder_name="unionfind",
+        decoder_name=decoder_name,
         d_inner=5,
         outer_trials_per_p=10
     )
@@ -512,7 +514,7 @@ if __name__ == '__main__':
     fail_soft = simulate_outer_soft_information(
         code,
         p_phys_list=p_vals_soft,
-        decoder_name="unionfind",
+        decoder_name=decoder_name,
         d_inner=5,
         trials_per_p=10,
         N_inner=1,
