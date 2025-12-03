@@ -128,7 +128,7 @@ if __name__ == "__main__":
     for decoder_name in decoders:
         for p_physical in [0.06, 0.1, 0.12, 0.16]:
             avg_phi, log_likelihood_per_bin, counts = main_inner_code(P_PHYSICAL=p_physical, DECODER_NAME=decoder_name,
-                                                                      MAX_ITERATIONS=100)
+                                                                      MAX_ITERATIONS=10_000)
             results_dict[(decoder_name, p_physical)] = [avg_phi, log_likelihood_per_bin, counts]
 
     import matplotlib.pyplot as plt
