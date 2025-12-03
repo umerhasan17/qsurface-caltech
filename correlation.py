@@ -123,23 +123,37 @@ if __name__ == "__main__":
 
     results_dict = {}
 
-    decoders = ["ufbfs"]
+    decoders = ["unionfind", "ufbfs"]
 
     for decoder_name in decoders:
-        for p_physical in [0.06, 0.08, 0.1, 0.12, 0.16, 0.2]:
+        for p_physical in [0.06, 0.1, 0.12, 0.16]:
             avg_phi, log_likelihood_per_bin, counts = main_inner_code(P_PHYSICAL=p_physical, DECODER_NAME=decoder_name,
-                                                                      MAX_ITERATIONS=2_000)
+                                                                      MAX_ITERATIONS=100)
             results_dict[(decoder_name, p_physical)] = [avg_phi, log_likelihood_per_bin, counts]
 
     import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    import numpy as np
 
-    # ufbfs
+    # --- 1. SETUP COLORS (Define once) ---
+    # Dark Navy (#061A40) -> Turquoise (#40E0D0)
+    cols = ["#061A40", "#40E0D0"]
+    custom_cmap = mcolors.LinearSegmentedColormap.from_list("navy_turquoise", cols)
+
+    # Define the absolute range for normalization
+    norm = mcolors.Normalize(vmin=0.06, vmax=0.16)
+
+    # --- 2. MAIN PLOTTING LOOP ---
     for decoder_name in decoders:
-        # Get all unique p_physical values for this decoder
+
+        # Create a new figure and axis for THIS decoder
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Get all p values available for this specific decoder
         p_physical_values = sorted(set([p for (d, p) in results_dict.keys() if d == decoder_name]))
 
-        # Plot one line per p_physical
         for p_physical in p_physical_values:
+            # Unpack data
             avg_phi, log_likelihood_per_bin, counts = results_dict[(decoder_name, p_physical)]
 
             # Filter out invalid values (inf, nan)
@@ -147,25 +161,45 @@ if __name__ == "__main__":
             avg_phi_valid = avg_phi[valid_mask]
             log_likelihood_valid = log_likelihood_per_bin[valid_mask]
 
-            # Plot data points
-            line_handle = plt.plot(avg_phi_valid, log_likelihood_valid, marker='o', linestyle='none',
-                                   label=f'p={p_physical}')
-            point_color = line_handle[0].get_color()
+            if len(avg_phi_valid) == 0:
+                continue
 
-            # Fit a line (linear regression)
+            # Get color based on p_physical
+            current_color = custom_cmap(norm(p_physical))
+
+            # A. Plot Data Points (Add label here for the legend)
+            ax.plot(avg_phi_valid, log_likelihood_valid,
+                    marker='o',
+                    linestyle='none',
+                    color=current_color,
+                    label=f'$p={p_physical}$')
+
+            # B. Fit and Plot Line (No label here to keep legend clean)
             if len(avg_phi_valid) > 1:
-                # Fit polynomial of degree 1 (straight line)
                 coeffs = np.polyfit(avg_phi_valid, log_likelihood_valid, 1)
-                # Generate points for the fitted line
                 phi_fit = np.linspace(avg_phi_valid.min(), avg_phi_valid.max(), 100)
                 log_likelihood_fit = np.polyval(coeffs, phi_fit)
-                # Plot the fitted line
-                plt.plot(phi_fit, log_likelihood_fit, linestyle='--', alpha=0.7, linewidth=1.5, color=point_color)
 
-        plt.xlabel("soft output phi (binned)")
-        plt.ylabel("log likelihood logical error rate p_L")
-        plt.title(f"Correlation for decoder: {decoder_name}")
-        plt.legend()
+                ax.plot(phi_fit, log_likelihood_fit,
+                        linestyle='--',
+                        linewidth=1.5,
+                        alpha=0.7,
+                        color=current_color)
+
+        # --- 3. FORMATTING & LABELS ---
+        ax.set_xlabel(r"$\phi$ (binned)", fontsize=12)
+        ax.set_ylabel("Log Likelihood Logical Error Rate", fontsize=12)
+        ax.set_title(f"Correlation for Decoder: {decoder_name}", fontsize=14)
+
+        ax.grid(True, alpha=0.3)
+
+        # FORCE LEGEND TO TOP LEFT
+        ax.legend(title="Physical Error Rate", loc='upper left')
+
+        # Save and Show
+        plt.tight_layout()
+        plt.savefig(f"correlation_{decoder_name}.pdf")
         plt.show()
-        # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="ufbfs", MAX_ITERATIONS=1_000)
-        # main_inner_code(P_PHYSICAL=0.1, DECODER_NAME="unionfind", MAX_ITERATIONS=1_000)
+
+        # Close figure to clear memory
+        plt.close(fig)

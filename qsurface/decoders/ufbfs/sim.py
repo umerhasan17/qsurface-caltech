@@ -361,20 +361,14 @@ class Toric(Sim):
             # Line 3: v[l] = 1 (implicitly handled by processing)
             root_cluster = current_ancilla.cluster.find() if current_ancilla.cluster else None
 
-            if self.config["print_steps"]:
-                print(f"L[{i}]/{len(L)}: Processing ancilla at {current_ancilla.loc}, root_cluster={root_cluster.index if root_cluster else None}")
-
             # Line 4: if root(l) is invalid then
             if root_cluster and root_cluster.parity % 2 == 1 and not root_cluster.on_bound:
                 if self.config["print_steps"]:
-                    print(f"  Cluster {root_cluster.index} is INVALID: parity={root_cluster.parity}, on_bound={root_cluster.on_bound}, support={root_cluster.support}")
-                    print(f"    Boundary: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}")
+                    print(f"Growing clusters for root {root_cluster}:")
+
                 # Ensure boundary is populated before growing
                 if not root_cluster.bound and not root_cluster.new_bound:
                     # Boundary is empty: populate from all ancillas in cluster
-                    if self.config["print_steps"]:
-                        print(f"    Populating empty boundary from all ancillas in cluster")
-                    boundary_count = 0
                     for layer in self.code.ancilla_qubits.values():
                         for ancilla in layer.values():
                             if ancilla.cluster and ancilla.cluster.find() == root_cluster:
@@ -385,14 +379,8 @@ class Toric(Sim):
                                         boundary_tuple = (ancilla, edge, new_ancilla)
                                         if boundary_tuple not in root_cluster.new_bound and self.support[edge] != 2:
                                             root_cluster.new_bound.append(boundary_tuple)
-                                            boundary_count += 1
-                    if self.config["print_steps"]:
-                        print(f"    Added {boundary_count} edges to new_bound")
                 elif root_cluster.support != 0:
                     # Boundary exists but support != 0: add neighbors of current_ancilla if not already there
-                    if self.config["print_steps"]:
-                        print(f"    Adding neighbors of current_ancilla to boundary")
-                    added_count = 0
                     neighbors = self.get_neighbors(current_ancilla)
                     for new_ancilla, edge in neighbors.values():
                         new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
@@ -400,30 +388,20 @@ class Toric(Sim):
                             boundary_tuple = (current_ancilla, edge, new_ancilla)
                             if boundary_tuple not in root_cluster.new_bound and boundary_tuple not in root_cluster.bound and self.support[edge] != 2:
                                 root_cluster.new_bound.append(boundary_tuple)
-                                added_count += 1
-                    if self.config["print_steps"]:
-                        print(f"    Added {added_count} new edges to new_bound")
 
                 # Line 5-17: grow boundary and merge clusters
                 union_list = []
-                growth_iter = 0
                 while root_cluster.bound or root_cluster.new_bound:
-                    growth_iter += 1
-                    if self.config["print_steps"]:
-                        print(f"    Growth iteration {growth_iter}: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}, support={root_cluster.support}")
                     self.grow_boundary(root_cluster, union_list)
                     root_cluster = root_cluster.find()
-                    if self.config["print_steps"]:
-                        print(f"      After growth: bound={len(root_cluster.bound)}, new_bound={len(root_cluster.new_bound)}, union_list={len(union_list)}, parity={root_cluster.parity}")
                     # Break if cluster becomes valid (even parity or on boundary)
                     if root_cluster.parity % 2 == 0 or root_cluster.on_bound:
-                        if self.config["print_steps"]:
-                            print(f"    Cluster {root_cluster.index} became VALID (parity={root_cluster.parity}, on_bound={root_cluster.on_bound})")
                         break
 
                 # Line 18-25: process union_list (merged clusters)
-                if self.config["print_steps"]:
-                    print(f"    Processing {len(union_list)} unions")
+                if union_list and self.config["print_steps"]:
+                    print("Cluster unions.")
+
                 for ancilla, edge, new_ancilla in union_list:
                     new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
                     if root_cluster != new_root:
@@ -441,7 +419,8 @@ class Toric(Sim):
                         # Line 22: Union(root(l), root(n))
                         if new_root:
                             if self.config["print_steps"]:
-                                print(f"      Union: cluster {root_cluster.index} (size={root_cluster.size}, parity={root_cluster.parity}) ∪ cluster {new_root.index} (size={new_root.size}, parity={new_root.parity})")
+                                # Use the same format as unionfind: Cx(a:b)∪Cy(c:d)= Cz(e:f)
+                                before = f"{root_cluster}∪{new_root}="
                             root_cluster.union(new_root)
                             
                             # Update cluster references after union
@@ -456,40 +435,24 @@ class Toric(Sim):
                             
                             root_cluster = root_cluster.find()
                             if self.config["print_steps"]:
-                                print(f"        Result: cluster {root_cluster.index} (size={root_cluster.size}, parity={root_cluster.parity}, on_bound={root_cluster.on_bound})")
+                                print(f"{before} {root_cluster}")
 
                 # Line 23-25: for each neighbor n of l, if root(n) != root(l) then append n to L
                 neighbors = self.get_neighbors(current_ancilla)
-                added_neighbors = 0
                 for new_ancilla, edge in neighbors.values():
                     new_root = new_ancilla.cluster.find() if new_ancilla.cluster else None
                     if root_cluster != new_root and new_ancilla not in L:
                         L.append(new_ancilla)
-                        added_neighbors += 1
-                if self.config["print_steps"]:
-                    print(f"    Added {added_neighbors} neighbors to L (L now has {len(L)} items)")
             else:
                 # Line 27: else append l to L'[root(l)]
                 if root_cluster:
-                    if self.config["print_steps"]:
-                        print(f"  Cluster {root_cluster.index} is VALID: parity={root_cluster.parity}, on_bound={root_cluster.on_bound}")
-                        print(f"    Adding to skipped_nodes (L'[{root_cluster.index}] now has {len(self.skipped_nodes[id(root_cluster)]) + 1} items)")
                     self.skipped_nodes[id(root_cluster)].append(current_ancilla)
             
             i += 1
 
         if self.config["print_steps"]:
-            print(f"\n{'='*60}")
-            print(f"Finished grow_clusters: processed {i} ancillas, L_size={len(L)}")
             final_invalid = [c for c in self.clusters if c.find().parity % 2 == 1 and not c.find().on_bound]
             print(f"Final invalid clusters: {len(final_invalid)}")
-            if final_invalid:
-                for c in final_invalid[:5]:
-                    root = c.find()
-                    print(f"  Cluster {root.index}: size={root.size}, parity={root.parity}, on_bound={root.on_bound}")
-            total_skipped = sum(len(v) for v in self.skipped_nodes.values())
-            print(f"Total skipped nodes (L'): {total_skipped}")
-            print(f"{'='*60}\n")
 
         #
         # if self.config["weighted_growth"]:
@@ -605,23 +568,19 @@ class Toric(Sim):
         cluster.support = 1 - cluster.support
         cluster.bound, cluster.new_bound = cluster.new_bound, []
 
-        edges_grown = 0
-        edges_fully_grown = 0
         while cluster.bound:
             boundary = cluster.bound.pop()
             new_edge = boundary[1]
 
             if self.support[new_edge] != 2:
                 self._edge_grow(*boundary)
-                edges_grown += 1
                 if self.support[new_edge] == 2:
                     union_list.append(boundary)
-                    edges_fully_grown += 1
                 else:
                     cluster.new_bound.append(boundary)
 
         if self.config["print_steps"]:
-            print(f"        Cluster {cluster.index}: grew {edges_grown} edges, {edges_fully_grown} fully grown, {len(cluster.new_bound)} half-grown remaining")
+            print(f"{cluster}, ", end="")
 
     """
     -------------------------------------------------------------------------------------------

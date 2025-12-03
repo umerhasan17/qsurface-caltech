@@ -4,6 +4,8 @@ from qldpc.codes import LPCode
 from qldpc.objects import Pauli
 import matplotlib.pyplot as plt
 import correlation
+import bfsufd_yiy_custom
+
 from tqdm import tqdm
 
 
@@ -337,6 +339,7 @@ def sample_inner_decisions_and_phis(
     inner_decisions = []
     inner_phis = []
     for _ in range(outer_n):
+        # result_dict = bfsufd_yiy_custom.bfsufd_get_phi_inner(p_bitflip=p_physical, d=d_inner, N=N)
         result_dict = correlation.get_phi_inner(p_physical, decoder_name, d_inner, N=N)
         c_hat = 1 - result_dict['no_error']  # 0 = no logical error, 1 = logical error
         phi = result_dict['phi']
@@ -360,6 +363,7 @@ def estimate_inner_logical_rate(
     """
     failures = 0
     for _ in range(num_samples):
+        # res = bfsufd_yiy_custom.bfsufd_get_phi_inner(p_bitflip=p_physical, d=d_inner, N=1)
         res = correlation.get_phi_inner(p_physical, decoder_name, d_inner, N=1)
         # in your code: c_hat = 1 - res['no_error']
         logical_error = 1 - res['no_error']
@@ -495,28 +499,28 @@ if __name__ == '__main__':
     Hz = get_Hz_matrix(code)
     n_outer = Hz.shape[1]
 
-    p_vals_hard = np.linspace(0.055, 0.075, 8)
-    decoder_name = "unionfind"
-    # decoder_name = "ufbfs"
+    p_vals_hard = np.linspace(0.005, 0.02, 8)
+    # decoder_name = "unionfind"
+    decoder_name = "ufbfs"
 
     fail_hard = simulate_outer_hard_uniform_prior(
         code,
         p_vals_hard,
         decoder_name=decoder_name,
         d_inner=5,
-        outer_trials_per_p=10
+        outer_trials_per_p=2000
     )
 
     print("failure rate hard info:", str(fail_hard))
 
-    p_vals_soft = np.linspace(0.065, 0.085, 8)
+    p_vals_soft = np.linspace(0.01, 0.025, 8)
 
     fail_soft = simulate_outer_soft_information(
         code,
         p_phys_list=p_vals_soft,
         decoder_name=decoder_name,
         d_inner=5,
-        trials_per_p=10,
+        trials_per_p=2000,
         N_inner=1,
     )
 
@@ -526,16 +530,19 @@ if __name__ == '__main__':
     plt.loglog(p_vals_hard, fail_hard, marker='o', label="hard information")
     plt.loglog(p_vals_soft, fail_soft, marker='s', label="soft information")
 
+    from datetime import datetime
+    timestamp = datetime.utcnow().strftime('%M_%d_%Y_%H:%M:%S')
+
     plt.xlabel("Physical error rate p ")
     plt.ylabel("Logical failure probability")
     plt.title("Union Find ")
     plt.grid(True, which="both", linestyle=":")
     plt.legend()
     plt.tight_layout()
-    plt.savefig("UF_plot.pdf")
+    plt.savefig(f"UF_plot_{timestamp}.pdf")
     plt.show()
 
-    with open("output.txt", "w") as f:
+    with open(f"output.txt", "a") as f:
         f.write("regular union find: \n")
         f.write("soft failure rates: ")
         f.write(" ".join(map(str, fail_soft)))
